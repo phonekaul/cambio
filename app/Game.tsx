@@ -98,8 +98,6 @@ interface State {
   adaptations: Adaptation[];
   /** Why Claude can't be reached, if it can't; the opponent then plays on its built-in engine. */
   offline: string | null;
-  /** Who just called Cambio: shows the big announcement for a moment. */
-  cambioFlash: Side | null;
   notices: string[];
   summary: SummaryResponse | null;
   summaryLoading: boolean;
@@ -126,7 +124,6 @@ const initial: State = {
   pulse: {},
   adaptations: [],
   offline: null,
-  cambioFlash: null,
   notices: [],
   summary: null,
   summaryLoading: false,
@@ -166,7 +163,6 @@ const PACE = {
   last: 1000, // after its final move of the turn
   burnReaction: 2500, // how long it waits after a card lands before burning (your chance to go first)
   give: 1200, // after it burns one of your cards, before it hands you a card
-  cambioFlash: 2200, // the big CAMBIO! announcement
   reveal: 3000, // all cards face-up on the table before the result appears
 };
 const who = (s: Side) => (s === "human" ? "You" : "The opponent");
@@ -325,10 +321,6 @@ export default function Game() {
       flashFor(ev).forEach((f) => flashes.push({ ...f, id: nextId.current++ }));
     }
     if (model !== s.model) saveModel(model);
-    const called = mv.ev.find((e) => e.t === "cambio");
-    if (called && called.t === "cambio") {
-      setTimeout(() => set((x) => ({ ...x, cambioFlash: null })), PACE.cambioFlash);
-    }
     set((x) => ({
       ...x,
       g: mv.g,
@@ -338,7 +330,6 @@ export default function Game() {
       ticker: [...lines.reverse(), ...x.ticker].slice(0, 4),
       flashes: [...x.flashes, ...flashes],
       pulse: { ...x.pulse, ...pulse },
-      cambioFlash: mv.ev.some((e) => e.t === "cambio") ? mv.ev.find((e) => e.t === "cambio")!.side : x.cambioFlash,
     }));
     if (flashes.length) {
       const ids = new Set(flashes.map((f) => f.id));
@@ -544,7 +535,7 @@ export default function Game() {
   /** The opponent holds off while you're mid-burn, reading a reveal, or a card is owed. */
   const aiPaused = () => {
     const s = ref.current;
-    return s.burning || s.reveal.length > 0 || !!s.g.pendingGive || s.cambioFlash !== null;
+    return s.burning || s.reveal.length > 0 || !!s.g.pendingGive;
   };
   async function waitWhilePaused(gid: number) {
     while (gid === gameId.current && aiPaused()) await sleep(150);
@@ -667,7 +658,7 @@ export default function Game() {
     const s = ref.current;
     const r = s.g.result!;
     saveModel(s.model);
-    set((x) => ({ ...x, summaryLoading: true, thinking: false, cambioFlash: null }));
+    set((x) => ({ ...x, summaryLoading: true, thinking: false }));
     // Every card turns face-up on the table first; the result follows a moment later.
     const gid = gameId.current;
     setTimeout(() => {
@@ -921,13 +912,6 @@ export default function Game() {
           <div className="btns">{buttons}</div>
         </div>
       </main>
-
-      {s.cambioFlash && (
-        <div className="cambio-flash" role="status">
-          <b>CAMBIO!</b>
-          <span>{s.cambioFlash === "human" ? "You called it. The opponent gets one last turn." : "The opponent called it. This is your last turn."}</span>
-        </div>
-      )}
 
       {ended && s.showResult && g.result && (
         <ResultModal

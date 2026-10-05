@@ -182,13 +182,6 @@ h1, h2, h3, h4, p { margin: 0; }
 .cambio-tag span { font-size: 12.5px; font-weight: 600; }
 .cambio-tag small { font-size: 11px; opacity: .85; }
 @keyframes glowPulse { 50% { box-shadow: 0 6px 16px rgba(0,0,0,.35), 0 0 0 6px rgba(184,50,63,.3); } }
-.cambio-flash {
-  position: fixed; inset: 0; z-index: 15; display: grid; place-content: center; justify-items: center; gap: 6px;
-  background: rgba(4,20,12,.45); pointer-events: none; animation: flashIn 2.2s ease forwards;
-}
-.cambio-flash b { font-size: clamp(56px, 12vw, 120px); font-weight: 900; letter-spacing: .06em; color: #fff; text-shadow: 0 6px 0 #b8323f, 0 10px 30px rgba(0,0,0,.5); }
-.cambio-flash span { font-size: 18px; font-weight: 600; color: var(--text); background: rgba(184,50,63,.92); border-radius: 999px; padding: 6px 18px; }
-@keyframes flashIn { 0% { opacity: 0; transform: scale(.8); } 12% { opacity: 1; transform: scale(1.04); } 20% { transform: scale(1); } 80% { opacity: 1; } 100% { opacity: 0; } }
 
 /* ---------- overlays ---------- */
 .overlay { position: fixed; inset: 0; background: rgba(4,20,12,.6); backdrop-filter: blur(3px); display: grid; place-items: center; padding: 16px; z-index: 20; overflow-y: auto; }
