@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { SUIT_GLYPH, isRed, slotName, type Card } from "../lib/cards";
 import type { Hand, Side } from "../lib/engine";
 import { behindInsight, gauges, localReads, positionInfo, type PlayerModel, type TraitKey } from "../lib/model";
@@ -134,16 +134,26 @@ const TRAIT_EMOJI: Record<string, string> = {
   info: "💡",
 };
 
-/** Sits on top of the opponent's hand: its latest move, then its reasoning (newest first). */
-export function ThoughtsPanel(props: { feed: FeedItem[]; thinking: boolean; lastMove?: string }) {
-  const { feed, thinking, lastMove } = props;
+/** Top-right box: the opponent's reasoning and what it notices about you (newest first). */
+export function ThoughtsPanel(props: { feed: FeedItem[]; thinking: boolean; offline: string | null }) {
+  const { feed, thinking, offline } = props;
+  const [why, setWhy] = useState(false);
   return (
-    <section className="thoughts" aria-label="Opponent's moves and thoughts">
+    <section className="thoughts" aria-label="Opponent's thoughts">
       <header className="thoughts-head">
-        <h2>Opponent</h2>
-        {lastMove && <p className="last-move" aria-live="polite">{lastMove}</p>}
+        <h2>Opponent&apos;s thoughts</h2>
         {thinking && <span className="dots" aria-label="Thinking"><i /><i /><i /></span>}
+        {offline && (
+          <button className="offline-btn" onClick={() => setWhy((v) => !v)} aria-expanded={why}>
+            Playing offline
+          </button>
+        )}
       </header>
+      {offline && why && (
+        <p className="offline-why">
+          Claude can&apos;t be reached, so the opponent is using its built-in engine: same rules and strategy, simpler thoughts. {offline}
+        </p>
+      )}
       <div className="feed">
         {feed.length === 0 && <p className="empty">Its reasoning and what it notices about you will show up here.</p>}
         {feed.map((f) =>

@@ -9,7 +9,13 @@ function getClient(): Anthropic {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error("The server has no ANTHROPIC_API_KEY set. See .env.example.");
   }
-  client ??= new Anthropic({ timeout: 50_000, maxRetries: 1 });
+  // Keys that aren't scoped to a workspace must name one on every request.
+  const workspace = process.env.ANTHROPIC_WORKSPACE_ID;
+  client ??= new Anthropic({
+    timeout: 50_000,
+    maxRetries: 1,
+    defaultHeaders: workspace ? { "anthropic-workspace-id": workspace } : undefined,
+  });
   return client;
 }
 

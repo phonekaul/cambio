@@ -333,7 +333,9 @@ function startCandidates(c: Ctx): { cands: Candidate[]; pWin: number | null } {
     label: "Draw from the deck",
     action: { type: "draw" },
     score: draw,
-    reasons: [`Average outcome of an unseen card is worth about ${f1(draw)}.`],
+    // `draw` is the expected points a fresh card saves me (best of swapping it in or tossing it),
+    // net of a small risk penalty. It is not the value of a card (that averages about 6).
+    reasons: [draw >= 0.5 ? `A fresh card from the deck should save me about ${f1(draw)} points on average.` : "The deck isn't likely to help me much right now."],
   });
 
   if (v.top) {

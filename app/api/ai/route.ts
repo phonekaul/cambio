@@ -55,12 +55,21 @@ export async function POST(req: Request) {
     return Response.json({ error: "Bad request body." }, { status: 400 });
   }
 
+  const t0 = Date.now();
   try {
-    if (body.action === "decide") return Response.json(await decide(body));
-    if (body.action === "summary") return Response.json(await summary(body));
+    if (body.action === "decide") {
+      const out = await decide(body);
+      console.log(`[ai] decide ok (${process.env.AI_MOCK === "1" ? "mock" : DECISION_MODEL}, ${Date.now() - t0}ms): ${out.choice}`);
+      return Response.json(out);
+    }
+    if (body.action === "summary") {
+      const out = await summary(body);
+      console.log(`[ai] summary ok (${SUMMARY_MODEL}, ${Date.now() - t0}ms)`);
+      return Response.json(out);
+    }
     return Response.json({ error: "Unknown action." }, { status: 400 });
   } catch (e) {
-    console.error(e);
+    console.error(`[ai] ${body.action} failed after ${Date.now() - t0}ms:`, e instanceof Error ? e.message : e);
     return Response.json({ error: e instanceof Error ? e.message : "The AI had a problem." }, { status: 500 });
   }
 }

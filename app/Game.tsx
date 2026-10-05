@@ -94,7 +94,12 @@ interface State {
   burning: boolean;
   pendingOwn: number | null;
   pulse: Partial<Record<TraitKey, number>>;
-  adaptations: string[];
+  /** Moves where its read on you changed what it played (vs. the same position with no profile). */
+  adaptations: Adaptation[];
+  /** Why Claude can't be reached, if it can't; the opponent then plays on its built-in engine. */
+  offline: string | null;
+  /** Who just called Cambio: shows the big announcement for a moment. */
+  cambioFlash: Side | null;
   notices: string[];
   summary: SummaryResponse | null;
   summaryLoading: boolean;
@@ -120,6 +125,8 @@ const initial: State = {
   pendingOwn: null,
   pulse: {},
   adaptations: [],
+  offline: null,
+  cambioFlash: null,
   notices: [],
   summary: null,
   summaryLoading: false,
@@ -128,12 +135,25 @@ const initial: State = {
   showProfile: false,
 };
 
-/** "The opponent drew from the deck." -> "Drew from the deck." (the box already says Opponent) */
-const shortMove = (line?: string) => {
-  if (!line) return line;
-  const rest = line.replace(/^The opponent /, "");
-  return rest.charAt(0).toUpperCase() + rest.slice(1);
-};
+interface Adaptation {
+  played: string;
+  instead: string;
+  because: string;
+}
+
+/** Candidate labels carry estimates in brackets, e.g. "(unknown (about 5.9))"; drop them for display. */
+const plainLabel = (label: string) => label.replace(/\s*\((?:[^()]|\([^()]*\))*\)\s*$/, "");
+
+/** A short, fixable reason for the "Playing offline" note. */
+function offlineReason(e: unknown): string {
+  const m = e instanceof Error ? e.message : String(e);
+  if (/workspace/i.test(m)) return "Reason: the API key isn't tied to a workspace. Add ANTHROPIC_WORKSPACE_ID to .env.local (or use a workspace key) and restart the server.";
+  if (/ANTHROPIC_API_KEY/.test(m)) return "Reason: the server has no ANTHROPIC_API_KEY set.";
+  if (/401|authentication|invalid x-api-key/i.test(m)) return "Reason: the API key was rejected.";
+  if (/429|budget|slow down/i.test(m)) return "Reason: the request limit was reached for now.";
+  if (/abort/i.test(m)) return "Reason: Claude took too long to answer.";
+  return "Reason: Claude couldn't be reached.";
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -146,6 +166,8 @@ const PACE = {
   last: 1000, // after its final move of the turn
   burnReaction: 2500, // how long it waits after a card lands before burning (your chance to go first)
   give: 1200, // after it burns one of your cards, before it hands you a card
+  cambioFlash: 2200, // the big CAMBIO! announcement
+  reveal: 3000, // all cards face-up on the table before the result appears
 };
 const who = (s: Side) => (s === "human" ? "You" : "The opponent");
 const its = (s: Side) => (s === "human" ? "your" : "its");
@@ -303,6 +325,10 @@ export default function Game() {
       flashFor(ev).forEach((f) => flashes.push({ ...f, id: nextId.current++ }));
     }
     if (model !== s.model) saveModel(model);
+    const called = mv.ev.find((e) => e.t === "cambio");
+    if (called && called.t === "cambio") {
+      setTimeout(() => set((x) => ({ ...x, cambioFlash: null })), PACE.cambioFlash);
+    }
     set((x) => ({
       ...x,
       g: mv.g,
@@ -312,6 +338,7 @@ export default function Game() {
       ticker: [...lines.reverse(), ...x.ticker].slice(0, 4),
       flashes: [...x.flashes, ...flashes],
       pulse: { ...x.pulse, ...pulse },
+      cambioFlash: mv.ev.some((e) => e.t === "cambio") ? mv.ev.find((e) => e.t === "cambio")!.side : x.cambioFlash,
     }));
     if (flashes.length) {
       const ids = new Set(flashes.map((f) => f.id));
@@ -327,7 +354,7 @@ export default function Game() {
     finalized.current = false;
     const prev = loadModel();
     const model = prev ? carryOver(prev) : emptyModel();
-    ref.current = { ...initial, screen: "game", g: newGame(), model, priorGames: model.games };
+    ref.current = { ...initial, screen: "game", g: newGame(), model, priorGames: model.games, offline: ref.current.offline };
     setState(ref.current);
     // Both players look at their two starting cards; the player's stay face-up until "Got it".
     const a = peekStart(ref.current.g, "human", [...START_PEEK_SLOTS]);
@@ -483,10 +510,12 @@ export default function Game() {
         recent: ref.current.notices.slice(-5).join("\n"),
       };
       const res = await post<DecideResponse>(req, 15000);
+      if (ref.current.offline) set((x) => ({ ...x, offline: null }));
       const cand = dec.candidates.find((c) => c.id === res.choice) ?? top;
       return { cand, thought: res.thought, llm: true };
     } catch (e) {
       console.warn("LLM decision unavailable, using the engine's top pick:", e);
+      set((x) => ({ ...x, offline: offlineReason(e) }));
       return { cand: top, thought: templateThought(dec, top), llm: false };
     }
   }
@@ -499,20 +528,23 @@ export default function Game() {
     if (latest?.text === thought) return;
     const tags = Array.from(new Set(dec.influences.map((i) => FEATURE_LABEL[i.feature])));
     const changed = dec.changed && dec.candidates[0].id === cand.id;
+    // Only record moves your profile actually changed: same position, no profile, different move.
+    const neutral = dec.candidates.find((c) => c.id === dec.neutralTopId);
+    const adapted: Adaptation | null =
+      changed && neutral && dec.influences[0]
+        ? { played: plainLabel(cand.label), instead: plainLabel(neutral.label), because: dec.influences[0].text }
+        : null;
     set((x) => ({
       ...x,
       feed: [{ id: nextId.current++, kind: "thought" as const, text: thought, tags, changed }, ...x.feed].slice(0, 60),
-      adaptations:
-        dec.influences.length > 0 && (changed || Math.abs(dec.influences[0].delta) >= 0.5)
-          ? [...x.adaptations, `${cand.label}. ${dec.influences[0].text}${changed ? " Without the profile I would have chosen a different move." : ""}`].slice(-8)
-          : x.adaptations,
+      adaptations: adapted ? [...x.adaptations, adapted].slice(-8) : x.adaptations,
     }));
   }
 
   /** The opponent holds off while you're mid-burn, reading a reveal, or a card is owed. */
   const aiPaused = () => {
     const s = ref.current;
-    return s.burning || s.reveal.length > 0 || !!s.g.pendingGive;
+    return s.burning || s.reveal.length > 0 || !!s.g.pendingGive || s.cambioFlash !== null;
   };
   async function waitWhilePaused(gid: number) {
     while (gid === gameId.current && aiPaused()) await sleep(150);
@@ -635,7 +667,12 @@ export default function Game() {
     const s = ref.current;
     const r = s.g.result!;
     saveModel(s.model);
-    set((x) => ({ ...x, showResult: true, summaryLoading: true, thinking: false }));
+    set((x) => ({ ...x, summaryLoading: true, thinking: false, cambioFlash: null }));
+    // Every card turns face-up on the table first; the result follows a moment later.
+    const gid = gameId.current;
+    setTimeout(() => {
+      if (gid === gameId.current) set((x) => ({ ...x, showResult: true }));
+    }, PACE.reveal);
     const resultText = `${r.winner === "human" ? "The player won" : r.winner === "ai" ? "The AI won" : "It was a tie"}. Final totals: player ${r.human}, AI ${r.ai}.${
       r.calledBy ? ` ${r.calledBy === "human" ? "The player" : "The AI"} called Cambio.` : ""
     }`;
@@ -646,21 +683,22 @@ export default function Game() {
           action: "summary",
           gauges: profileText(s.model),
           notes: s.notices.slice(-14),
-          adaptations: s.adaptations.slice(-6),
+          adaptations: s.adaptations.slice(-6).map((a) => `${a.played} instead of ${a.instead}: ${a.because}`),
           result: resultText,
           games: s.priorGames,
         },
         30000,
       );
-      set((x) => ({ ...x, summary: res, summaryLoading: false }));
+      set((x) => ({ ...x, summary: res, summaryLoading: false, offline: null }));
     } catch (e) {
       console.warn("Summary unavailable, using local read:", e);
+      set((x) => ({ ...x, offline: offlineReason(e) }));
       set((x) => ({
         ...x,
         summary: {
           headline: "My read on you",
           reads,
-          adapted: s.adaptations.slice(-2).map((a) => a.split(". ").slice(-1)[0]),
+          adapted: [],
           tip: "",
         },
         summaryLoading: false,
@@ -730,7 +768,7 @@ export default function Game() {
   let prompt: React.ReactNode = null;
   let buttons: React.ReactNode = null;
   if (ended) {
-    prompt = <>Round over.</>;
+    prompt = g.result ? <>Round over. You <b>{g.result.human}</b> · Opponent <b>{g.result.ai}</b></> : <>Round over.</>;
     buttons = <button className="btn primary" onClick={() => set((x) => ({ ...x, showResult: true }))}>See result</button>;
   } else if (g.phase === "peek") {
     prompt = <>Dealing…</>;
@@ -791,10 +829,11 @@ export default function Game() {
           <button className="btn small ghost" onClick={() => set((x) => ({ ...x, showRules: true }))}>Rules</button>
           <button className="btn small ghost" onClick={() => set((x) => ({ ...x, showProfile: true }))}>Your profile</button>
         </div>
+        <ThoughtsPanel feed={s.feed} thinking={s.thinking} offline={s.offline} />
       </header>
 
       <main className="table">
-        <ThoughtsPanel feed={s.feed} thinking={s.thinking} lastMove={shortMove(s.ticker[0])} />
+        <p className="opp-move" aria-live="polite">{ended ? "" : s.ticker[0] ?? ""}</p>
         <div className={`seat ai ${aiTurn ? "active" : ""}`}>
           <HandView
             side="ai"
@@ -813,6 +852,13 @@ export default function Game() {
         </div>
 
         <div className="center">
+          {g.calledBy && !ended && (
+            <div className={`cambio-tag ${g.calledBy}`}>
+              <b>Cambio!</b>
+              <span>{g.calledBy === "human" ? "You called it" : "Opponent called it"}</span>
+              <small>{g.finalFor === "human" ? "Your last turn" : "Its last turn"}</small>
+            </div>
+          )}
           <div className="pile deck">
             <div className="stack">
               <PlayingCard faceUp={false} selectable={canDrawPile} onClick={canDrawPile ? doDraw : undefined} label="Deck: click to draw" />
@@ -875,6 +921,13 @@ export default function Game() {
           <div className="btns">{buttons}</div>
         </div>
       </main>
+
+      {s.cambioFlash && (
+        <div className="cambio-flash" role="status">
+          <b>CAMBIO!</b>
+          <span>{s.cambioFlash === "human" ? "You called it. The opponent gets one last turn." : "The opponent called it. This is your last turn."}</span>
+        </div>
+      )}
 
       {ended && s.showResult && g.result && (
         <ResultModal
@@ -985,12 +1038,16 @@ function ResultModal({ s, onAgain, onClose }: { s: State; onAgain: () => void; o
                   <li key={i}>{x}</li>
                 ))}
               </ul>
-              {sm.adapted.length > 0 && (
+              {s.adaptations.length > 0 && (
                 <>
-                  <h4>How it used that</h4>
+                  <h4>Where your habits changed its play</h4>
                   <ul className="adapted">
-                    {sm.adapted.map((x, i) => (
-                      <li key={i}>{x}</li>
+                    {s.adaptations.slice(-3).map((a, i) => (
+                      <li key={i}>
+                        <div><span className="k">Played</span> {a.played}</div>
+                        <div><span className="k">Would have</span> {a.instead}</div>
+                        <div><span className="k">Because</span> {a.because}</div>
+                      </li>
                     ))}
                   </ul>
                 </>
