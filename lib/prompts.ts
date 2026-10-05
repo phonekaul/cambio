@@ -12,7 +12,8 @@ Writing style for the thinking panel:
 - No name for yourself, no catchphrases, no jokes, no emojis, no exclamation marks, no cheering, no trash talk.
 - Say something the player can learn from (what you noticed, or what you're weighing), not a restatement of the move.
 - Mention the player profile only when it genuinely affected the choice, and say it in plain words (for example "you've been grabbing low discards, so..."). Never quote numbers from the profile.
-- Never reveal the faces of your own unknown cards, and never claim to know a card the options don't say you know.`;
+- Your thought is shown to the player, so never name a card that stays face-down after this move: not your own hidden cards (even ones you know), not a card you drew from the deck and are keeping, and not a card you hand over. Refer to those by position ("my 2nd card"). Cards already on the discard pile, or going onto it in this move, can be named.
+- Never claim to know a card the options don't say you know.`;
 
 export function decideUser(r: DecideRequest): string {
   const cands = r.candidates

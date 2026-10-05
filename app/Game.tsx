@@ -16,7 +16,7 @@ import {
   type Candidate,
   type Decision,
 } from "../lib/brain";
-import { cardLabel, POWER_TEXT, powerOf, slotName } from "../lib/cards";
+import { ALL_CARDS, cardLabel, POWER_TEXT, powerOf, slotName } from "../lib/cards";
 import {
   burn,
   callCambio,
@@ -25,6 +25,7 @@ import {
   discardDrawn,
   drawDeck,
   giveCard,
+  hasSeen,
   kingDecide,
   legalStart,
   makeAiView,
@@ -145,8 +146,12 @@ const initial: State = {
 /** A short, fixable reason for the "Playing offline" note. */
 function offlineReason(e: unknown): string {
   const m = e instanceof Error ? e.message : String(e);
-  if (/workspace/i.test(m)) return "Reason: the API key isn't tied to a workspace. Add ANTHROPIC_WORKSPACE_ID to .env.local (or use a workspace key) and restart the server.";
-  if (/ANTHROPIC_API_KEY/.test(m)) return "Reason: the server has no ANTHROPIC_API_KEY set.";
+  if (/workspace/i.test(m)) {
+    // The server appends what it can see about ANTHROPIC_WORKSPACE_ID (never the value itself).
+    const seen = m.match(/\[(ANTHROPIC_WORKSPACE_ID[^\]]*)\]/)?.[1];
+    return `Reason: the API key isn't tied to a workspace, so the server must send a workspace ID. ${seen ? `Server check: ${seen}. ` : ""}Set ANTHROPIC_WORKSPACE_ID (.env.local locally, or your host's environment variables, such as Vercel's), then restart or redeploy.`;
+  }
+  if (/ANTHROPIC_API_KEY/.test(m)) return "Reason: the server has no ANTHROPIC_API_KEY set (.env.local locally, or your host's environment variables), then restart or redeploy.";
   if (/401|authentication|invalid x-api-key/i.test(m)) return "Reason: the API key was rejected.";
   if (/429|budget|slow down/i.test(m)) return "Reason: the request limit was reached for now.";
   if (/abort/i.test(m)) return "Reason: Claude took too long to answer.";
@@ -243,6 +248,38 @@ function flashFor(ev: GameEvent): Array<Omit<Flash, "id">> {
  * A card the AI drew from the deck and swaps into its hand stays hidden from you, so its thought
  * must not name it (or give away its value). Discards and pile takes are public, so they can.
  */
+const CARD_IN_BRACKETS = /\s*\((?:a known |the )?((?:10|[2-9]|[AJQK])[♠♥♦♣]|Joker)\)/g;
+const CARD_IN_TEXT = /(a known |the |an? |my )?\b((?:10|[2-9]|[AJQK])[♠♥♦♣]|Joker)/g;
+
+/**
+ * Replace any card the player can't see (and that isn't about to be revealed by this move) with a
+ * neutral phrase, so the opponent's thoughts never leak its hidden cards.
+ */
+function maskPrivate(text: string, g: GameState, revealing: Set<number>): string {
+  const isVisible = (label: string) =>
+    ALL_CARDS.some((c) => cardLabel(c) === label && (hasSeen(g, "human", c) || revealing.has(c.id)));
+  return text
+    .replace(CARD_IN_BRACKETS, (whole, label: string) => (isVisible(label) ? whole : ""))
+    .replace(CARD_IN_TEXT, (whole, prefix: string | undefined, label: string) => {
+      if (isVisible(label)) return whole;
+      if (prefix === "my ") return "one of my cards";
+      if (prefix === "the ") return "that card";
+      if (prefix) return "a card I know";
+      return "a hidden card";
+    });
+}
+
+/** Which cards an AI action is about to turn face-up (so its thought may name them). */
+function revealedBy(action: AiAction, g: GameState): Set<number> {
+  const ids = new Set<number>();
+  if (action.type === "swap") {
+    const old = g.hands.ai[action.slot];
+    if (old) ids.add(old.id);
+  }
+  if ((action.type === "discard" || action.type === "power") && g.drawn) ids.add(g.drawn.card.id);
+  return ids;
+}
+
 function hideSecretDraw(view: AiView, cand: Candidate, thought: string, dec: Decision): string {
   if (view.drawn?.from !== "deck" || cand.action.type !== "swap") return thought;
   const why = dec.influences[0]?.text;
@@ -574,7 +611,7 @@ export default function Game() {
           const pick = await choose(dec, view);
           if (gid !== gameId.current) return;
           if (ref.current.g !== g) continue; // the table changed while it thought (a burn): think again
-          addThought(dec, pick.cand, hideSecretDraw(view, pick.cand, pick.thought, dec), pick.llm);
+          addThought(dec, pick.cand, maskPrivate(hideSecretDraw(view, pick.cand, pick.thought, dec), g, revealedBy(pick.cand.action, g)), pick.llm);
           await sleep(PACE.afterThought);
           await playAction(pick.cand.action, gid);
         } else if (g.phase === "power") {
@@ -602,8 +639,10 @@ export default function Game() {
         console.error(e2);
       }
     } finally {
-      aiBusy.current = false;
-      if (gid === gameId.current) set((x) => ({ ...x, thinking: false }));
+      if (gid === gameId.current) {
+        aiBusy.current = false;
+        set((x) => ({ ...x, thinking: false }));
+      }
     }
   }
 
@@ -632,7 +671,9 @@ export default function Game() {
       if (!pick) return;
       const m = burn(s.g, "ai", pick.target, pick.slot);
       if (!m) return;
-      set((x) => ({ ...x, feed: [{ id: nextId.current++, kind: "thought" as const, text: pick.thought, tags: [], changed: false }, ...x.feed].slice(0, 60) }));
+      const burned = s.g.hands[pick.target][pick.slot];
+      const text = maskPrivate(pick.thought, s.g, new Set(burned ? [burned.id] : []));
+      set((x) => ({ ...x, feed: [{ id: nextId.current++, kind: "thought" as const, text, tags: [], changed: false }, ...x.feed].slice(0, 60) }));
       commit(m);
       if (m.g.pendingGive) {
         setTimeout(() => {
@@ -684,7 +725,7 @@ export default function Game() {
           result: resultText,
           games: s.priorGames,
         },
-        30000,
+        55000,
       );
       set((x) => ({ ...x, summary: res, summaryLoading: false, offline: null }));
     } catch (e) {

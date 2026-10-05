@@ -106,6 +106,9 @@ export const topDiscard = (g: Game): Card | null => g.discard[g.discard.length -
 function popDeck(g: Game): Card | null {
   if (g.deck.length === 0 && g.discard.length > 1) {
     const top = g.discard.pop()!;
+    const back = new Set(g.discard.map((c) => c.id));
+    g.seen.human = g.seen.human.filter((id) => !back.has(id));
+    g.seen.ai = g.seen.ai.filter((id) => !back.has(id));
     g.deck = shuffle(g.discard);
     g.discard = [top];
   }
