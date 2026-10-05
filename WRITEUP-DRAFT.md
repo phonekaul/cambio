@@ -30,7 +30,7 @@ Thousands of simulated games against scripted risky/careful/random players (inva
 ## Honest limitations
 - Tested against scripted opponents, not many real players; win rate vs. humans is unknown.
 - Game state is client-side (fine for a demo, not tamper-proof).
-- Simplified rule set (e.g. one slam per turn, hands laid out in a single row).
+- Two-player rule set: burning on any new discard (first to burn locks the other out), Cambio instead of drawing, hands laid out in a single row.
 
 ## What I'd do next
-Learn from many players to seed priors; model bluffing and slam behaviour; multi-round sessions with adaptation across rounds; server-side state; richer evaluation of the opponent's hidden cards.
+Learn from many players to seed priors; model bluffing and burn behaviour; multi-round sessions with adaptation across rounds; server-side state; richer evaluation of the opponent's hidden cards.

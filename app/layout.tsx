@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Cambio",
-  description: "A memory card game against an opponent that learns how you play.",
+  title: "Cambio Trainer",
+  description: "Play Cambio against an AI that studies your habits and tells you what it found.",
 };
 
 export const viewport: Viewport = {

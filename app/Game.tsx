@@ -1,12 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { aiMoves } from "../lib/aiplay";
+import { aiSteps } from "../lib/aiplay";
 import {
   buildDecision,
+  burnDecision,
   describeSituation,
   FEATURE_LABEL,
+  giveDecision,
   isHumanBehind,
+  kingDecision,
   pickPeekSlots,
   templateThought,
   type AiAction,
@@ -15,17 +18,20 @@ import {
 } from "../lib/brain";
 import { cardLabel, POWER_TEXT, powerOf, slotName } from "../lib/cards";
 import {
+  burn,
   callCambio,
+  canBurn,
   canCallCambio,
   discardDrawn,
   drawDeck,
+  giveCard,
   kingDecide,
   legalStart,
   makeAiView,
   newGame,
   peekStart,
   skipPower,
-  slam,
+  START_PEEK_SLOTS,
   swapDrawn,
   takeDiscard,
   topDiscard,
@@ -84,9 +90,9 @@ interface State {
   reveal: RevealCell[];
   revealNote: string;
   flashes: Flash[];
-  slamming: boolean;
+  /** The player pressed Burn and is choosing a card. The opponent holds off while they choose. */
+  burning: boolean;
   pendingOwn: number | null;
-  peekSel: number[];
   pulse: Partial<Record<TraitKey, number>>;
   adaptations: string[];
   notices: string[];
@@ -110,9 +116,8 @@ const initial: State = {
   reveal: [],
   revealNote: "",
   flashes: [],
-  slamming: false,
+  burning: false,
   pendingOwn: null,
-  peekSel: [],
   pulse: {},
   adaptations: [],
   notices: [],
@@ -121,6 +126,13 @@ const initial: State = {
   showResult: false,
   showRules: false,
   showProfile: false,
+};
+
+/** "The opponent drew from the deck." -> "Drew from the deck." (the box already says Opponent) */
+const shortMove = (line?: string) => {
+  if (!line) return line;
+  const rest = line.replace(/^The opponent /, "");
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -132,6 +144,8 @@ const PACE = {
   step: 1700, // between each move it makes (draw, swap, power...)
   holdDrawn: 2000, // how long its drawn card hangs in the air before it decides
   last: 1000, // after its final move of the turn
+  burnReaction: 2500, // how long it waits after a card lands before burning (your chance to go first)
+  give: 1200, // after it burns one of your cards, before it hands you a card
 };
 const who = (s: Side) => (s === "human" ? "You" : "The opponent");
 const its = (s: Side) => (s === "human" ? "your" : "its");
@@ -158,10 +172,14 @@ function describe(ev: GameEvent): string | null {
       return ev.swapped
         ? `${who(ev.side)} swapped ${its(ev.side)} ${slotName(ev.ownSlot)} card with ${theirs(ev.side)} ${slotName(ev.oppSlot)} card.`
         : `${who(ev.side)} kept everything as it was.`;
-    case "slam":
+    case "burn": {
+      const whose = ev.target === ev.side ? its(ev.side) : theirs(ev.side);
       return ev.success
-        ? `${who(ev.side)} matched the ${cardLabel(ev.card)} and threw it away.`
-        : `${who(ev.side)} tried to match with a ${cardLabel(ev.card)} and missed. Penalty card.`;
+        ? `${who(ev.side)} burned ${whose} ${slotName(ev.slot)} card, the ${cardLabel(ev.card)}.`
+        : `${who(ev.side)} tried to burn ${whose} ${slotName(ev.slot)} card, but it was a ${cardLabel(ev.card)}. Penalty card.`;
+    }
+    case "give":
+      return `${who(ev.side)} gave ${ev.side === "human" ? "the opponent" : "you"} ${its(ev.side)} ${slotName(ev.from)} card to fill the gap.`;
     case "cambio":
       return `${who(ev.side)} called Cambio! ${ev.side === "human" ? "The opponent gets" : "You get"} one last turn.`;
     default:
@@ -193,11 +211,24 @@ function flashFor(ev: GameEvent): Array<Omit<Flash, "id">> {
             { side: o(ev.side), slot: ev.oppSlot, kind: "swap" },
           ]
         : [];
-    case "slam":
-      return [{ side: ev.side, slot: ev.slot, kind: ev.success ? "match" : "miss" }];
+    case "burn":
+      return ev.success ? [] : [{ side: ev.target, slot: ev.slot, kind: "miss" }];
+    case "give":
+      return [{ side: o(ev.side), slot: ev.to, kind: "swap" }];
     default:
       return [];
   }
+}
+
+/**
+ * A card the AI drew from the deck and swaps into its hand stays hidden from you, so its thought
+ * must not name it (or give away its value). Discards and pile takes are public, so they can.
+ */
+function hideSecretDraw(view: AiView, cand: Candidate, thought: string, dec: Decision): string {
+  if (view.drawn?.from !== "deck" || cand.action.type !== "swap") return thought;
+  const why = dec.influences[0]?.text;
+  const line = `I'm keeping the card I drew. It goes where my ${slotName(cand.action.slot)} card was.`;
+  return why ? `${line} ${why}` : line;
 }
 
 const confLabel = (c: number) => (c < 0.34 ? "low" : c < 0.6 ? "medium" : "high");
@@ -268,7 +299,7 @@ export default function Game() {
         if (n.trait !== "info") pulse[n.trait] = nextId.current;
       }
       const d = describe(ev);
-      if (d) lines.push(d);
+      if (d && "side" in ev && ev.side === "ai") lines.push(d);
       flashFor(ev).forEach((f) => flashes.push({ ...f, id: nextId.current++ }));
     }
     if (model !== s.model) saveModel(model);
@@ -298,6 +329,17 @@ export default function Game() {
     const model = prev ? carryOver(prev) : emptyModel();
     ref.current = { ...initial, screen: "game", g: newGame(), model, priorGames: model.games };
     setState(ref.current);
+    // Both players look at their two starting cards; the player's stay face-up until "Got it".
+    const a = peekStart(ref.current.g, "human", [...START_PEEK_SLOTS]);
+    const b = a && peekStart(a.g, "ai", pickPeekSlots());
+    if (!a || !b) return;
+    commit(a);
+    commit(b);
+    set((x) => ({
+      ...x,
+      reveal: START_PEEK_SLOTS.map((slot) => ({ side: "human" as Side, slot })),
+      revealNote: "These are your two starting cards. Memorise them.",
+    }));
   }
 
   function forget() {
@@ -306,23 +348,6 @@ export default function Game() {
   }
 
   /* ---------- opening peek ---------- */
-
-  function togglePeek(slot: number) {
-    const s = ref.current;
-    if (s.g.phase !== "peek" || s.g.peeked.human) return;
-    let sel = s.peekSel.includes(slot) ? s.peekSel.filter((x) => x !== slot) : [...s.peekSel, slot];
-    if (sel.length > 2) sel = sel.slice(1);
-    set((x) => ({ ...x, peekSel: sel }));
-    if (sel.length === 2) {
-      const a = peekStart(ref.current.g, "human", sel);
-      if (!a) return;
-      const b = peekStart(a.g, "ai", pickPeekSlots());
-      if (!b) return;
-      commit(a);
-      commit(b);
-      set((x) => ({ ...x, reveal: sel.map((slot) => ({ side: "human" as Side, slot })), peekSel: [] }));
-    }
-  }
 
   function dismissReveal() {
     set((x) => ({ ...x, reveal: [], revealNote: "" }));
@@ -353,26 +378,35 @@ export default function Game() {
     set((x) => ({ ...x, pendingOwn: null }));
   }
 
+  /** Burn: any time a fresh card is on the pile, on anyone's turn, from either hand. */
+  function tryBurn(target: Side, slot: number) {
+    const rank = ref.current.g.burnRank;
+    const m = burn(ref.current.g, "human", target, slot);
+    if (!m) return set((x) => ({ ...x, burning: false }));
+    commit(m);
+    const ev = m.ev[0];
+    if (ev.t === "burn" && !ev.success) {
+      set((x) => ({
+        ...x,
+        burning: false,
+        reveal: [{ side: target, slot }],
+        revealNote: `That was a ${cardLabel(ev.card)}, not a ${rank === "JK" ? "Joker" : rank}. You take a penalty card.`,
+      }));
+    } else set((x) => ({ ...x, burning: false }));
+  }
+
+  function doGive(slot: number) {
+    const m = giveCard(ref.current.g, "human", slot);
+    if (m) commit(m);
+  }
+
   function onOwnSlot(slot: number) {
     const s = ref.current;
     const g = s.g;
-    if (g.phase === "peek") return togglePeek(slot);
-    if (s.reveal.length || g.turn !== "human") return;
-    if (g.phase === "start" && s.slamming) {
-      const m = slam(g, "human", slot);
-      if (!m) return;
-      commit(m);
-      const ev = m.ev[0];
-      if (ev.t === "slam" && !ev.success) {
-        set((x) => ({
-          ...x,
-          slamming: false,
-          reveal: [{ side: "human", slot }],
-          revealNote: `That was a ${cardLabel(ev.card)}, not a match. You take a penalty card.`,
-        }));
-      } else set((x) => ({ ...x, slamming: false }));
-      return;
-    }
+    if (s.reveal.length || g.phase === "peek" || g.phase === "ended") return;
+    if (g.pendingGive?.by === "human") return doGive(slot);
+    if (s.burning) return tryBurn("human", slot);
+    if (g.turn !== "human") return;
     if (g.phase === "drawn") {
       const m = swapDrawn(g, "human", slot);
       if (m) commit(m);
@@ -390,7 +424,9 @@ export default function Game() {
   function onOppSlot(slot: number) {
     const s = ref.current;
     const g = s.g;
-    if (s.reveal.length || g.turn !== "human") return;
+    if (s.reveal.length || g.phase === "peek" || g.phase === "ended") return;
+    if (s.burning) return tryBurn("ai", slot);
+    if (g.turn !== "human") return;
     if (g.phase === "king") {
       if (s.pendingOwn === null) return;
       const m = kingDecide(g, "human", s.pendingOwn, slot);
@@ -458,6 +494,9 @@ export default function Game() {
   function addThought(dec: Decision, cand: Candidate, thought: string, llm: boolean) {
     const trivial = cand.action.type === "draw" && !llm && dec.influences.length === 0;
     if (trivial) return;
+    // Taking from the pile and then placing the card can produce the same sentence twice.
+    const latest = ref.current.feed.find((f) => f.kind === "thought");
+    if (latest?.text === thought) return;
     const tags = Array.from(new Set(dec.influences.map((i) => FEATURE_LABEL[i.feature])));
     const changed = dec.changed && dec.candidates[0].id === cand.id;
     set((x) => ({
@@ -470,10 +509,23 @@ export default function Game() {
     }));
   }
 
+  /** The opponent holds off while you're mid-burn, reading a reveal, or a card is owed. */
+  const aiPaused = () => {
+    const s = ref.current;
+    return s.burning || s.reveal.length > 0 || !!s.g.pendingGive;
+  };
+  async function waitWhilePaused(gid: number) {
+    while (gid === gameId.current && aiPaused()) await sleep(150);
+  }
+
+  /** Play an action one step at a time. Each step reads the table as it is now (you may have burned
+   * something in between); if a step no longer applies, stop and let the turn loop re-decide. */
   async function playAction(action: AiAction, gid: number) {
-    const moves = aiMoves(ref.current.g, action);
-    for (const mv of moves) {
+    for (const step of aiSteps(action)) {
+      await waitWhilePaused(gid);
       if (gid !== gameId.current) return;
+      const mv = step(ref.current.g);
+      if (!mv) return;
       commit(mv);
       await sleep(mv.g.phase === "ended" ? PACE.last : mv.g.phase === "drawn" ? PACE.holdDrawn : mv.g.turn !== "ai" ? PACE.last : PACE.step);
     }
@@ -486,27 +538,27 @@ export default function Game() {
     set((x) => ({ ...x, thinking: true }));
     try {
       await sleep(PACE.start);
-      for (let guard = 0; guard < 4; guard++) {
+      for (let guard = 0; guard < 10; guard++) {
+        await waitWhilePaused(gid);
         const g = ref.current.g;
-        if (gid !== gameId.current || g.turn !== "ai" || g.phase !== "start") break;
-        const view = makeAiView(g);
-        const dec = buildDecision(view, profileFromModel(ref.current.model), "start");
-        const pick = await choose(dec, view);
-        if (gid !== gameId.current) return;
-        addThought(dec, pick.cand, pick.thought, pick.llm);
-        await sleep(PACE.afterThought);
-        await playAction(pick.cand.action, gid);
-        if (pick.cand.action.type !== "slam") break;
-      }
-      const g2 = ref.current.g;
-      if (gid === gameId.current && g2.turn === "ai" && g2.phase === "drawn") {
-        const view = makeAiView(g2);
-        const dec = buildDecision(view, profileFromModel(ref.current.model), "drawn");
-        const pick = await choose(dec, view);
-        if (gid !== gameId.current) return;
-        addThought(dec, pick.cand, pick.thought, pick.llm);
-        await sleep(PACE.afterThought);
-        await playAction(pick.cand.action, gid);
+        if (gid !== gameId.current || g.turn !== "ai" || g.phase === "ended" || g.phase === "peek") break;
+        if (g.phase === "start" || g.phase === "drawn") {
+          const view = makeAiView(g);
+          const dec = buildDecision(view, profileFromModel(ref.current.model), g.phase);
+          const pick = await choose(dec, view);
+          if (gid !== gameId.current) return;
+          if (ref.current.g !== g) continue; // the table changed while it thought (a burn): think again
+          addThought(dec, pick.cand, hideSecretDraw(view, pick.cand, pick.thought, dec), pick.llm);
+          await sleep(PACE.afterThought);
+          await playAction(pick.cand.action, gid);
+        } else if (g.phase === "power") {
+          const m = skipPower(g, "ai");
+          if (m) commit(m);
+        } else if (g.phase === "king") {
+          const k = kingDecision(makeAiView(g));
+          const m = kingDecide(g, "ai", k?.own ?? null, k?.opp ?? null);
+          if (m) commit(m);
+        }
       }
     } catch (e) {
       console.error("AI turn failed, playing a safe fallback move", e);
@@ -531,11 +583,43 @@ export default function Game() {
 
   useEffect(() => {
     const g = state.g;
-    if (state.screen === "game" && g.phase !== "ended" && g.phase !== "peek" && g.turn === "ai" && g.phase === "start" && state.reveal.length === 0 && !aiBusy.current) {
+    if (state.screen === "game" && g.phase !== "ended" && g.phase !== "peek" && g.turn === "ai" && state.reveal.length === 0 && !aiBusy.current) {
       void runAi();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.g, state.reveal.length, state.screen]);
+
+  /* ---------- the AI burns, on anyone's turn ---------- */
+
+  // A fresh burn window (new card on the pile, or the AI just burned and may keep going) arms one
+  // timer. It waits PACE.burnReaction so you get the first chance, then burns only cards it knows.
+  const burnKey = `${topDiscard(state.g)?.id ?? "-"}:${state.g.burnRank ?? "-"}:${state.g.burnedBy ?? "-"}:${state.g.burnMissed.join(",")}`;
+  useEffect(() => {
+    if (state.screen !== "game" || state.reveal.length || state.burning) return;
+    const g = state.g;
+    if (g.phase === "peek" || g.phase === "ended" || g.pendingGive || !burnDecision(makeAiView(g))) return;
+    const gid = gameId.current;
+    const t = setTimeout(() => {
+      const s = ref.current;
+      if (gid !== gameId.current || s.burning || s.reveal.length || s.g.pendingGive) return;
+      const pick = burnDecision(makeAiView(s.g));
+      if (!pick) return;
+      const m = burn(s.g, "ai", pick.target, pick.slot);
+      if (!m) return;
+      set((x) => ({ ...x, feed: [{ id: nextId.current++, kind: "thought" as const, text: pick.thought, tags: [], changed: false }, ...x.feed].slice(0, 60) }));
+      commit(m);
+      if (m.g.pendingGive) {
+        setTimeout(() => {
+          if (gid !== gameId.current) return;
+          const slot = giveDecision(makeAiView(ref.current.g));
+          const gv = slot === null ? null : giveCard(ref.current.g, "ai", slot);
+          if (gv) commit(gv);
+        }, PACE.give);
+      }
+    }, PACE.burnReaction);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [burnKey, state.reveal.length, state.burning, state.screen]);
 
   /* ---------- the end ---------- */
 
@@ -616,14 +700,17 @@ export default function Game() {
     (kingLooking && side === "human" && slot === g.kingOwn);
 
   const ownSelectable = (slot: number) => {
-    if (blocked || ended) return false;
-    if (g.phase === "peek") return !g.peeked.human;
+    if (blocked || ended || g.phase === "peek") return false;
+    if (g.pendingGive) return g.pendingGive.by === "human";
+    if (s.burning) return true;
     if (g.turn !== "human") return false;
-    if (g.phase === "start") return s.slamming;
+    if (g.phase === "start") return false;
     return g.phase === "drawn" || g.phase === "power" && g.power !== "peekOpp" || g.phase === "king";
   };
   const oppSelectable = (slot: number) => {
-    if (blocked || ended || g.turn !== "human") return false;
+    if (blocked || ended || g.pendingGive) return false;
+    if (s.burning) return true;
+    if (g.turn !== "human") return false;
     if (g.phase === "king") return s.pendingOwn !== null;
     if (g.phase !== "power") return false;
     if (g.power === "peekOpp") return true;
@@ -632,11 +719,13 @@ export default function Game() {
 
   // The piles are the controls: click the deck to draw, the discard pile to take its top card,
   // or (holding a card you drew) the discard pile to throw it away.
-  const ready = humanTurn && !blocked && !s.slamming;
+  const ready = humanTurn && !blocked && !s.burning && !g.pendingGive;
   const canDrawPile = ready && legal.canDraw;
   const canTakePile = ready && legal.canTake;
   const canDiscardHeld = ready && g.phase === "drawn" && g.drawn?.from === "deck";
   const canCall = ready && canCallCambio(g, "human");
+  const burnOpen = !blocked && !s.burning && canBurn(g, "human");
+  const rankName = (r: string | null) => (r === "JK" ? "Joker" : r ?? "");
 
   let prompt: React.ReactNode = null;
   let buttons: React.ReactNode = null;
@@ -644,28 +733,25 @@ export default function Game() {
     prompt = <>Round over.</>;
     buttons = <button className="btn primary" onClick={() => set((x) => ({ ...x, showResult: true }))}>See result</button>;
   } else if (g.phase === "peek") {
-    prompt = g.peeked.human ? <>Ready?</> : <>Pick <b>two</b> of your cards to peek at ({s.peekSel.length}/2). Then memorise them.</>;
+    prompt = <>Dealing…</>;
   } else if (blocked) {
-    prompt = <>{s.revealNote || (g.phase === "start" && g.turn === "human" && g.turnsTaken.human === 0 ? "Memorise your cards." : "Take a good look.")}</>;
+    prompt = <>{s.revealNote || "Take a good look."}</>;
     buttons = <button className="btn primary" onClick={dismissReveal}>Got it</button>;
+  } else if (g.pendingGive?.by === "human") {
+    prompt = <>Burned! Now click one of <b>your</b> cards to give the opponent in its place.</>;
+  } else if (g.pendingGive) {
+    prompt = <>The opponent burned one of your cards and is choosing a card to give you.</>;
+  } else if (s.burning) {
+    prompt = <>Burn: click any card you know is a <b>{rankName(g.burnRank)}</b>, yours or the opponent&apos;s. A wrong guess costs a penalty card.</>;
+    buttons = <button className="btn small" onClick={() => set((x) => ({ ...x, burning: false }))}>Cancel</button>;
   } else if (aiTurn) {
     prompt = g.calledBy === "human" ? <>You called Cambio. The opponent gets <b>one last turn</b>.</> : <>The opponent is taking its turn.</>;
   } else if (humanTurn && g.phase === "start") {
-    if (s.slamming) {
-      prompt = <>Which of your cards matches the <b>{top ? cardLabel(top) : ""}</b>? Wrong guesses cost a penalty card.</>;
-      buttons = <button className="btn small" onClick={() => set((x) => ({ ...x, slamming: false }))}>Cancel</button>;
-    } else {
-      prompt = (
-        <>
-          {g.finalFor === "human" && <><b>Last turn!</b> </>}Your turn. Draw from the deck{top ? <>, or take the <b>{cardLabel(top)}</b></> : null}.
-        </>
-      );
-      buttons = legal.canSlam ? (
-        <button className="btn small" onClick={() => set((x) => ({ ...x, slamming: true }))} title="Throw away one of your cards if it matches the top discard">
-          Match the {top ? cardLabel(top) : "discard"}
-        </button>
-      ) : null;
-    }
+    prompt = (
+      <>
+        {g.finalFor === "human" && <><b>Last turn!</b> </>}Your turn. Draw from the deck{top && legal.canTake ? <>, or take the <b>{cardLabel(top)}</b></> : null}.
+      </>
+    );
   } else if (humanTurn && g.phase === "drawn" && g.drawn) {
     const power = g.drawn.from === "deck" ? powerOf(g.drawn.card) : null;
     prompt =
@@ -695,21 +781,20 @@ export default function Game() {
 
   const drawnHold = g.drawn && g.turn === "human";
   const aiHolds = g.drawn && g.turn === "ai";
-  const lastEvent = s.ticker[0];
 
   return (
     <div className="app">
       <header className="topbar">
         <div className="logo">
-          <h1>Cambio</h1>
+          <h1>Cambio Trainer</h1>
           <button className="btn small ghost" onClick={startGame}>New game</button>
           <button className="btn small ghost" onClick={() => set((x) => ({ ...x, showRules: true }))}>Rules</button>
           <button className="btn small ghost" onClick={() => set((x) => ({ ...x, showProfile: true }))}>Your profile</button>
         </div>
-        <ThoughtsPanel feed={s.feed} thinking={s.thinking} />
       </header>
 
       <main className="table">
+        <ThoughtsPanel feed={s.feed} thinking={s.thinking} lastMove={shortMove(s.ticker[0])} />
         <div className={`seat ai ${aiTurn ? "active" : ""}`}>
           <HandView
             side="ai"
@@ -750,6 +835,17 @@ export default function Game() {
             )}
             <small>Discard</small>
           </div>
+          <div className="burn-slot">
+            {burnOpen && (
+              <button
+                className="btn small burn"
+                onClick={() => set((x) => ({ ...x, burning: true, pendingOwn: null }))}
+                title="Know where a matching card is? Burn it onto the pile."
+              >
+                Burn a {rankName(g.burnRank)}
+              </button>
+            )}
+          </div>
         </div>
 
         <div className={`seat you ${humanTurn ? "active" : ""}`}>
@@ -763,24 +859,22 @@ export default function Game() {
             hand={g.hands.human}
             faceUp={(i) => faceUp("human", i)}
             selectable={ownSelectable}
-            selected={(i) => s.peekSel.includes(i) || s.pendingOwn === i}
+            selected={(i) => s.pendingOwn === i}
             flashes={s.flashes}
             onSlot={onOwnSlot}
           />
+          {canCall && (
+            <button className="btn cambio" onClick={doCall} title="Call it instead of drawing: the opponent gets one last turn, then everyone reveals">
+              Cambio!
+            </button>
+          )}
         </div>
 
         <div className="actionbar">
-          {lastEvent && <p className="last-event" aria-live="polite">{lastEvent}</p>}
           <p className="prompt">{prompt}</p>
           <div className="btns">{buttons}</div>
         </div>
       </main>
-
-      {canCall && (
-        <button className="btn cambio" onClick={doCall} title="End the round: the opponent gets one last turn">
-          Call Cambio
-        </button>
-      )}
 
       {ended && s.showResult && g.result && (
         <ResultModal
@@ -822,17 +916,17 @@ function Menu(props: {
           <PlayingCard card={{ id: 1, rank: "K", suit: "H" }} faceUp />
           <PlayingCard faceUp={false} />
         </div>
-        <h1>Cambio</h1>
-        <p className="lead">A memory card game against an opponent that's trying to figure out how <i>you</i> play.</p>
+        <h1>Cambio Trainer</h1>
+        <p className="lead">Play Cambio against an AI that studies your habits, plays against them, and tells you what it found.</p>
         <ul className="points">
           <li>
-            <span>🃏</span> Keep the lowest total. Your cards stay face-down.
+            <b>A real opponent.</b> Same rules, same hidden cards. It only knows what it has actually seen, so every read it makes is earned.
           </li>
           <li>
-            <span>🧠</span> It watches what you keep, swap, risk and remember, and builds a profile of you as you play.
+            <b>It learns how you play.</b> What you keep, what you pass on, how well you remember, how early you call Cambio.
           </li>
           <li>
-            <span>🎯</span> Then it uses that profile against you. You can see both its thinking and your profile live.
+            <b>Then it shows its hand.</b> After each round you get its read on your game, the moves it made because of it, and one thing to try next time.
           </li>
         </ul>
         {stored && stored.games + 1 > 0 && stored.evidence > 0 && (

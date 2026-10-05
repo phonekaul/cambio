@@ -1,11 +1,11 @@
 /* Simulation harness: AI (no LLM) vs scripted players. Checks invariants and profile learning. */
 import { aiMoves } from "../lib/aiplay";
-import { buildDecision, isHumanBehind, describeSituation, templateThought } from "../lib/brain";
+import { buildDecision, burnDecision, giveDecision, isHumanBehind, describeSituation, templateThought } from "../lib/brain";
 import { cardLabel, ALL_CARDS } from "../lib/cards";
 import { cardValue, powerOf } from "../lib/cards";
 import {
-  callCambio, discardDrawn, drawDeck, handScore, hasSeen, kingDecide, legalStart, makeAiView, newGame, peekStart,
-  skipPower, slam, swapDrawn, takeDiscard, topDiscard, useBlindSwap, useKingLook, usePeekOpp, usePeekOwn,
+  burn, callCambio, canBurn, discardDrawn, drawDeck, giveCard, handScore, hasSeen, kingDecide, legalStart, makeAiView, newGame, peekStart,
+  skipPower, swapDrawn, takeDiscard, topDiscard, useBlindSwap, useKingLook, usePeekOpp, usePeekOwn,
   type Game, type Move,
 } from "../lib/engine";
 import { carryOver, emptyModel, gauges, observeHuman, profileFromModel, type PlayerModel } from "../lib/model";
@@ -34,12 +34,16 @@ function humanTurn(g0: Game, style: Style): Move[] {
   const knownSlots = () => mine().filter((i) => hasSeen(g, "human", g.hands.human[i]!));
   const unseenSlots = () => mine().filter((i) => !hasSeen(g, "human", g.hands.human[i]!));
 
-  // matching
+  // burning (own cards only; the AI's cards it knows are burned too, then it gives a card back)
   const top = topDiscard(g);
-  if (legalStart(g, "human").canSlam && top) {
+  if (canBurn(g, "human") && top) {
     const hit = knownSlots().find((i) => g.hands.human[i]!.rank === top.rank);
-    if (hit !== undefined) push(slam(g, "human", hit), "slam");
-    else if (style === "risky" && Math.random() < 0.15) push(slam(g, "human", mine()[rnd(mine().length)]), "blind slam");
+    const theirs = slots(g.hands.ai).find((i) => hasSeen(g, "human", g.hands.ai[i]!) && g.hands.ai[i]!.rank === top.rank);
+    if (hit !== undefined) push(burn(g, "human", "human", hit), "burn");
+    else if (theirs !== undefined && mine().length > 1 && style !== "careful") {
+      push(burn(g, "human", "ai", theirs), "burn theirs");
+      if (g.pendingGive) push(giveCard(g, "human", mine()[0]), "give");
+    } else if (style === "risky" && Math.random() < 0.15) push(burn(g, "human", "human", mine()[rnd(mine().length)]), "blind burn");
   }
   if (g.phase === "ended") return moves;
   // calling
@@ -87,6 +91,7 @@ function humanTurn(g0: Game, style: Style): Move[] {
 }
 
 let leakChecks = 0;
+let burns = 0;
 function leakCheck(g: Game, d: ReturnType<typeof buildDecision>, view: ReturnType<typeof makeAiView>) {
   // Every card face mentioned in anything handed to the LLM / the panel must be one the AI has actually seen.
   const visibleIds = new Set<number>([...g.seen.ai, ...g.discard.map((c) => c.id)]);
@@ -147,6 +152,20 @@ function playGame(style: Style, model: PlayerModel, stats: any) {
       g = mv.g; lastEv = mv.ev.map((e) => JSON.stringify(e).slice(0, 140)).join(" ; ");
       conservation(g, "after-move");
     }
+    // The AI reacts to the new discard after each turn, whoever's turn it was. (Precomputed turns
+    // would go stale if it burned mid-turn; the UI handles that case by re-deciding.)
+    {
+      const pick = g.phase !== "ended" && !g.pendingGive ? burnDecision(makeAiView(g)) : null;
+      if (pick) {
+        const b = burn(g, "ai", pick.target, pick.slot);
+        check(!!b && b.ev[0].t === "burn" && b.ev[0].success, "AI burn must be legal and correct");
+        if (b) {
+          g = b.g; burns++;
+          if (g.pendingGive) { const gv = giveCard(g, "ai", giveDecision(makeAiView(g))!); check(!!gv, "AI give legal"); if (gv) g = gv.g; }
+          conservation(g, "after-ai-burn");
+        }
+      }
+    }
     check(moves.length > 0 || g.phase === "ended", "turn produced no moves");
   }
   if (g.phase !== "ended") console.log("  STUCK:", JSON.stringify({ phase: g.phase, turn: g.turn, turns: g.turnsTaken, deck: g.deck.length, discard: g.discard.length, human: g.hands.human.map((c) => c && c.rank), ai: g.hands.ai.map((c) => c && c.rank), calledBy: g.calledBy, top: topDiscard(g)?.rank }));
@@ -178,6 +197,7 @@ for (const style of styles) {
   console.log(`  decisions ${stats.decisions}, changed by profile ${stats.changed} (${((100 * stats.changed) / stats.decisions).toFixed(1)}%), influences:`, stats.influenced);
   console.log(`  last-game gauges: risk ${gg.risk.value.toFixed(2)} (conf ${gg.risk.conf.toFixed(2)}), memory ${gg.memory.value.toFixed(2)}, cambio ${gg.cambio.value.toFixed(2)}, discard ${gg.discard.value.toFixed(2)}, predict ${gg.predict.value.toFixed(2)}, position ${gg.position.headline}`);
 }
+console.log(`AI burns: ${burns}`);
 console.log(`leak checks run: ${leakChecks}`);
 console.log(failures === 0 ? "\nALL SIMULATION CHECKS PASSED" : `\n${failures} FAILURES`);
 void powerOf;

@@ -134,12 +134,14 @@ const TRAIT_EMOJI: Record<string, string> = {
   info: "💡",
 };
 
-export function ThoughtsPanel(props: { feed: FeedItem[]; thinking: boolean }) {
-  const { feed, thinking } = props;
+/** Sits on top of the opponent's hand: its latest move, then its reasoning (newest first). */
+export function ThoughtsPanel(props: { feed: FeedItem[]; thinking: boolean; lastMove?: string }) {
+  const { feed, thinking, lastMove } = props;
   return (
-    <section className="thoughts" aria-label="Opponent's thoughts">
+    <section className="thoughts" aria-label="Opponent's moves and thoughts">
       <header className="thoughts-head">
-        <h2>Opponent&apos;s thoughts</h2>
+        <h2>Opponent</h2>
+        {lastMove && <p className="last-move" aria-live="polite">{lastMove}</p>}
         {thinking && <span className="dots" aria-label="Thinking"><i /><i /><i /></span>}
       </header>
       <div className="feed">
@@ -245,36 +247,73 @@ export function RulesModal({ onClose }: { onClose: () => void }) {
     <div className="overlay" onClick={onClose}>
       <div className="modal rules" onClick={(e) => e.stopPropagation()}>
         <h2>How to play</h2>
-        <p className="lead">Finish with the lowest total. Your cards stay face-down, so remember them.</p>
-        <div className="two">
-          <div>
-            <h3>Card values</h3>
-            <ul className="vals">
-              <li><b>Joker</b> −1</li>
-              <li><b>Red King</b> 0</li>
-              <li><b>Ace</b> 1</li>
-              <li><b>2 – 10</b> face value</li>
-              <li><b>Jack</b> 11</li>
-              <li><b>Queen</b> 12</li>
-              <li><b>Black King</b> 13</li>
-            </ul>
-          </div>
-          <div>
-            <h3>Powers</h3>
-            <p className="small">Draw one from the deck and press <b>Use power</b>:</p>
-            <ul className="vals">
-              <li><b>7, 8</b> peek at one of yours</li>
-              <li><b>9, 10</b> peek at one of theirs</li>
-              <li><b>J, Q</b> swap yours with theirs, unseen</li>
-              <li><b>Black K</b> look at one of yours and one of theirs, then swap any of yours with any of theirs if you like</li>
-            </ul>
-          </div>
+
+        <h3>Goal</h3>
+        <p>
+          Have the <b>lowest score</b> when the round ends. Your cards stay face down, so remember the cards you&apos;ve seen and try to
+          replace high cards with low ones. If you think you have the lowest score, call <b>CAMBIO!</b>
+        </p>
+
+        <h3>Card values</h3>
+        <ul className="vals">
+          <li><b>Ace – 10</b>: face value</li>
+          <li><b>J, Q, Black K</b>: 10</li>
+          <li><b>Red K</b>: −1</li>
+          <li><b>Joker</b>: 0</li>
+        </ul>
+
+        <h3>Special cards</h3>
+        <div className="table-scroll">
+          <table className="abilities">
+            <tbody>
+              <tr><th>7 / 8</th><td>Peek at one of your own cards</td></tr>
+              <tr><th>9 / 10</th><td>Peek at another player&apos;s card</td></tr>
+              <tr><th>J / Q</th><td>Swap one of your cards with another player&apos;s card without looking</td></tr>
+              <tr><th>Black K</th><td>Look at one of your cards and another player&apos;s card, then choose whether to swap</td></tr>
+            </tbody>
+          </table>
         </div>
-        <h3>On your turn</h3>
+        <p className="small">
+          Special abilities can only be used when the card is <b>drawn from the draw pile and discarded on the same turn</b>.
+        </p>
+
+        <h3>Setup</h3>
         <ul className="plain">
-          <li>Click the <b>deck</b> to draw, then swap it with one of your cards or click the discard pile to throw it away (and use its power). Click the <b>discard pile</b> instead to take its top card; you must swap that one in.</li>
-          <li><b>Match</b> before you draw: if one of your cards has the same rank as the top discard, throw it away. Guess wrong and you take a penalty card.</li>
-          <li><b>Call Cambio</b> any time during your turn to end the round. The other player gets one last turn, then everyone reveals. Lowest total wins, and a tie goes to the player who didn't call.</li>
+          <li>You have <b>4 face-down cards</b>.</li>
+          <li>
+            At the start, look at the <b>2 cards closest to you</b> (here, your two leftmost cards). Remember them — you can&apos;t look at
+            them again unless a card effect lets you.
+          </li>
+          <li>The remaining cards form the draw pile.</li>
+        </ul>
+
+        <h3>On your turn</h3>
+        <p className="small">Choose one:</p>
+        <ol className="plain">
+          <li><b>Take the most recent face-up discard</b> (click the discard pile). Replace one of your face-down cards with it.</li>
+          <li>
+            <b>Draw from the face-down draw pile</b> (click the deck). Either replace one of your cards with it, or discard it (click the
+            discard pile) and use its special ability, if it has one.
+          </li>
+          <li>
+            <b>Call CAMBIO!</b> if you think you have the lowest score. You don&apos;t draw a card. Everyone else gets <b>one final turn</b>,
+            then all cards are revealed and the lowest-scoring hand wins. (A tie goes to the player who didn&apos;t call.)
+          </li>
+        </ol>
+
+        <h3>Burning</h3>
+        <p>
+          Whenever a new card enters the face-up discard pile, players may try to <b>burn</b> a card of the same rank that they know is on
+          the table. For example, if an <b>8</b> is discarded and you know another player&apos;s card is an 8, you can reveal that card and
+          place it on the discard pile. Press <b>Burn</b> next to the pile, then click the card. You can do this at any time, on anyone&apos;s
+          turn, as long as nobody has burned on that card yet.
+        </p>
+        <ul className="plain">
+          <li>If you burn <b>your own card</b>, the empty space remains empty.</li>
+          <li>If you burn <b>another player&apos;s card</b>, give them one of your face-down cards to replace it.</li>
+          <li>Only the <b>first player to match</b> gets the opportunity to burn.</li>
+          <li>Once a player successfully matches, all other players are locked out and the successful player may continue burning matching cards.</li>
+          <li>If you guess wrong, the card stays where it was and you take a <b>penalty card</b> from the draw pile.</li>
         </ul>
         <button className="btn primary" onClick={onClose}>Got it</button>
       </div>

@@ -1,5 +1,5 @@
 import { cardLabel, cardValue, powerOf, slotCol, slotName, type Card, type PowerKind } from "./cards";
-import { MIN_TURNS_BEFORE_CALL, type AiView, type SlotView } from "./engine";
+import { MIN_TURNS_BEFORE_CALL, START_PEEK_SLOTS, type AiView, type SlotView } from "./engine";
 
 /** The AI only calls Cambio when it believes its own hand is under this many points... */
 const AI_CALL_MAX_OWN = 5;
@@ -463,9 +463,9 @@ export function buildDecision(view: AiView, profile: Profile, kind: "start" | "d
 /* small deterministic choices                                         */
 /* ------------------------------------------------------------------ */
 
+/** Everyone looks at the same two starting cards (see START_PEEK_SLOTS in the engine). */
 export function pickPeekSlots(): [number, number] {
-  const slots = [0, 1, 2, 3].sort(() => Math.random() - 0.5);
-  return [slots[0], slots[1]];
+  return [...START_PEEK_SLOTS];
 }
 
 /**

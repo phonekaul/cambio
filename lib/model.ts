@@ -400,24 +400,44 @@ export function observeHuman(
       }
       break;
     }
-    case "slam": {
-      const slotSeen = seenSlot(ev.slot);
-      tally("slam");
-      useSlot(ev.slot);
-      if (ev.success && slotSeen) {
-        bump(m.memory, 1, 0);
-        risky(false, 0.3);
-        notes.push({ trait: "memory", text: `You matched the ${cardLabel(ev.card)} from memory.`, dir: 1 });
-      } else if (ev.success) {
-        risky(true, 1);
-        notes.push({ trait: "risk", text: `You matched blind and it paid off (${cardLabel(ev.card)}).`, dir: 1 });
-      } else if (slotSeen) {
-        bump(m.memory, 0, 1.2);
-        notes.push({ trait: "memory", text: `You tried to match with a card you'd seen, but it was a ${cardLabel(ev.card)}.`, dir: -1 });
+    case "burn": {
+      tally("burn");
+      if (ev.target === "human") {
+        const slotSeen = seenSlot(ev.slot);
+        useSlot(ev.slot);
+        if (ev.success && slotSeen) {
+          bump(m.memory, 1, 0);
+          risky(false, 0.3);
+          notes.push({ trait: "memory", text: `You burned the ${cardLabel(ev.card)} from memory.`, dir: 1 });
+        } else if (ev.success) {
+          risky(true, 1);
+          notes.push({ trait: "risk", text: `You burned blind and it paid off (${cardLabel(ev.card)}).`, dir: 1 });
+        } else if (slotSeen) {
+          bump(m.memory, 0, 1.2);
+          notes.push({ trait: "memory", text: `You tried to burn a card you'd seen, but it was a ${cardLabel(ev.card)}.`, dir: -1 });
+        } else {
+          risky(true, 1);
+          notes.push({ trait: "risk", text: "You tried a blind burn and missed.", dir: 1 });
+        }
       } else {
-        risky(true, 1);
-        notes.push({ trait: "risk", text: "You tried a blind match and missed.", dir: 1 });
+        // Burning one of my cards: did they really know it, or was it a guess?
+        const known = before.own[ev.slot]?.seenByOther ?? false;
+        if (ev.success && known) {
+          bump(m.memory, 1, 0);
+          notes.push({ trait: "memory", text: `You remembered my ${slotName(ev.slot)} card was a ${cardLabel(ev.card)} and burned it.`, dir: 1 });
+        } else if (ev.success) {
+          risky(true, 1);
+          notes.push({ trait: "risk", text: `You guessed my ${slotName(ev.slot)} card and got it right.`, dir: 1 });
+        } else {
+          if (known) bump(m.memory, 0, 1.2);
+          else risky(true, 1);
+          notes.push({ trait: known ? "memory" : "risk", text: `You tried to burn my ${slotName(ev.slot)} card, but it was a ${cardLabel(ev.card)}.`, dir: known ? -1 : 1 });
+        }
       }
+      break;
+    }
+    case "give": {
+      useSlot(ev.from);
       break;
     }
     case "cambio": {

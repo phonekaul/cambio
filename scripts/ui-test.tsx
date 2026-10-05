@@ -18,6 +18,7 @@ import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-libra
 import Game from "../app/Game";
 
 let failures = 0;
+let burnTries = 0;
 const check = (c: boolean, m: string) => { if (!c) { failures++; console.log("  FAIL:", m); } };
 const btn = (re: RegExp) => screen.queryAllByRole("button").find((b) => re.test(b.textContent ?? "") && !(b as HTMLButtonElement).disabled);
 const click = async (el: Element | undefined | null) => { if (!el) return false; await act(async () => { fireEvent.click(el); }); return true; };
@@ -32,11 +33,11 @@ async function playOne(gameNo: number, style: "draw-discard" | "swap" | "call-ea
   const { container } = render(<Game />);
   await click(btn(/^Play$/));
   check(!!document.querySelector(".table"), "table rendered after Play");
-  // opening peek: click two own cards
+  // opening peek: the two leftmost cards are shown automatically
   const own = ownCards();
   check(own.length === 4, `4 own cards (${own.length})`);
-  await click(own[0]); await click(own[3]);
-  check(/memorise|Got it/i.test(promptText() + (document.body.textContent ?? "")), "reveal shown after peeking");
+  check(/Memorise/i.test(promptText()), "starting cards shown with a memorise prompt");
+  check(own[0].classList.contains("up") && own[1].classList.contains("up"), "the two leftmost cards are the ones shown");
   check(document.querySelectorAll(".hand.human .pcard.up").length === 2, "exactly two own cards face-up after the opening peek");
   check(document.querySelectorAll(".hand.ai .pcard.up").length === 0, "AI cards stay hidden");
   await click(btn(/^Got it$/));
@@ -48,10 +49,9 @@ async function playOne(gameNo: number, style: "draw-discard" | "swap" | "call-ea
     await wait(15);
     const p = promptText();
     if (btn(/^Got it$/)) { await click(btn(/^Got it$/)); continue; }
+    if (steps % 5 === 0 && btn(/^Burn a /)) { burnTries++; await click(btn(/^Burn a /)); continue; }
     if (/Your turn\. Draw from the deck/.test(p)) {
-      if (style === "call-early" && btn(/Call Cambio/)) { await click(btn(/Call Cambio/)); continue; }
-      // a legit match attempt sometimes
-      if (steps % 7 === 0 && btn(/^Match the/)) { await click(btn(/^Match the/)); await click(selectable(ownCards())[0]); continue; }
+      if (style === "call-early" && btn(/^Cambio!$/)) { await click(btn(/^Cambio!$/)); continue; }
       await click(document.querySelector(".pile.deck .pcard.selectable")); continue;
     }
     if (/Swap it into your hand|to swap in the/.test(p)) {
@@ -69,7 +69,8 @@ async function playOne(gameNo: number, style: "draw-discard" | "swap" | "call-ea
       continue;
     }
     if (/Take a look\. To swap/.test(p)) { if (steps % 2) await click(btn(/Keep as is/)); else { await click(selectable(ownCards())[0]); await click(selectable(oppCards())[0]); } continue; }
-    if (/Which of your cards matches/.test(p)) { await click(selectable(ownCards())[0]); continue; }
+    if (/^Burn: click any card/.test(p)) { await click(selectable(ownCards())[0]); continue; }
+    if (/to give the opponent/.test(p)) { await click(selectable(ownCards())[0]); continue; }
     // otherwise the AI is moving
   }
   check(!!document.querySelector(".result"), `game ${gameNo} (${style}) reached the result screen in ${steps} steps`);
@@ -91,6 +92,7 @@ async function playOne(gameNo: number, style: "draw-discard" | "swap" | "call-ea
   for (let i = 0; i < styles.length; i++) await playOne(i + 1, styles[i]);
   console.error = origErr;
   check(errs.length === 0, "no console errors: " + errs.slice(0, 3).join(" | "));
+  check(burnTries > 0, `the player burned at least once (${burnTries})`);
   console.log(failures === 0 ? "\nALL UI CHECKS PASSED" : `\n${failures} UI FAILURES`);
   process.exit(failures ? 1 : 0);
 })();
