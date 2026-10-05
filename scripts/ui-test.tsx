@@ -78,7 +78,9 @@ async function playOne(gameNo: number, style: "draw-discard" | "swap" | "call-ea
   await waitFor(() => { if (!document.querySelector(".reads")) throw new Error("no summary"); }, { timeout: 3000 });
   check(/Mock headline/.test(document.body.textContent ?? ""), "summary rendered");
   check(/Work on this next time/.test(document.body.textContent ?? "") && /Mock tip/.test(document.body.textContent ?? ""), "the one thing to work on is shown");
-  check(document.querySelectorAll(".hand.ai .pcard.up").length >= 1, "AI hand revealed at the end");
+  // Every card the AI still holds is face-up (it may hold none: burning can empty a hand).
+  const aiCards = document.querySelectorAll(".hand.ai .pcard").length;
+  check(document.querySelectorAll(".hand.ai .pcard.up").length === aiCards, "AI hand revealed at the end");
   await click(btn(/^Your profile$/));
   const ev = Number((document.querySelector(".profile .panel-head .status")?.textContent ?? "").match(/(\d+) observations/)?.[1] ?? 0);
   check(ev > 0, `profile gathered evidence (${ev} observations)`);

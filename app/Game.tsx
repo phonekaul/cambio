@@ -155,10 +155,15 @@ function offlineReason(e: unknown): string {
   if (/401|authentication|invalid x-api-key/i.test(m)) return "Reason: the API key was rejected.";
   if (/429|budget|slow down/i.test(m)) return "Reason: the request limit was reached for now.";
   if (/abort/i.test(m)) return "Reason: Claude took too long to answer.";
-  return "Reason: Claude couldn't be reached.";
+  if (/overloaded|529/i.test(m)) return "Reason: Claude is overloaded right now.";
+  if (/wasn't offered/.test(m)) return "Reason: Claude picked a move that wasn't on the list.";
+  return `Reason: Claude couldn't be reached. Details: ${m.slice(0, 160)}`;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Failed Claude calls in a row before the "Playing offline" badge appears (a single blip is ignored). */
+const OFFLINE_AFTER = 2;
 
 /** Opponent pacing (ms), slow enough to follow each step it takes. */
 const PACE = {
@@ -325,6 +330,7 @@ export default function Game() {
   const gameId = useRef(0);
   const nextId = useRef(1);
   const finalized = useRef(false);
+  const aiFails = useRef(0);
   const [stored, setStored] = useState<PlayerModel | null>(null);
 
   const set = useCallback((fn: (s: State) => State) => {
@@ -547,13 +553,14 @@ export default function Game() {
         neutralTopLabel: dec.changed ? neutral?.label ?? null : null,
         recent: ref.current.notices.slice(-5).join("\n"),
       };
-      const res = await post<DecideResponse>(req, 15000);
+      const res = await post<DecideResponse>(req, 25000);
+      aiFails.current = 0;
       if (ref.current.offline) set((x) => ({ ...x, offline: null }));
       const cand = dec.candidates.find((c) => c.id === res.choice) ?? top;
       return { cand, thought: res.thought, llm: true };
     } catch (e) {
       console.warn("LLM decision unavailable, using the engine's top pick:", e);
-      set((x) => ({ ...x, offline: offlineReason(e) }));
+      if (++aiFails.current >= OFFLINE_AFTER) set((x) => ({ ...x, offline: offlineReason(e) }));
       return { cand: top, thought: templateThought(dec, top), llm: false };
     }
   }
@@ -727,10 +734,11 @@ export default function Game() {
         },
         55000,
       );
+      aiFails.current = 0;
       set((x) => ({ ...x, summary: res, summaryLoading: false, offline: null }));
     } catch (e) {
       console.warn("Summary unavailable, using local read:", e);
-      set((x) => ({ ...x, offline: offlineReason(e) }));
+      if (++aiFails.current >= OFFLINE_AFTER) set((x) => ({ ...x, offline: offlineReason(e) }));
       set((x) => ({
         ...x,
         summary: {
