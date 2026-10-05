@@ -19,7 +19,7 @@ async function decide(r: DecideRequest): Promise<DecideResponse> {
     system: SYSTEM,
     user: decideUser(r),
     tool: DECIDE_TOOL(ids),
-    maxTokens: 400,
+    maxTokens: 1000,
   });
   // The engine listed the legal options; anything else is rejected and the client falls back.
   if (!ids.includes(out.choice)) throw new Error("The model picked an option that wasn't offered.");
@@ -33,13 +33,12 @@ async function summary(r: SummaryRequest): Promise<SummaryResponse> {
     system: SUMMARY_SYSTEM,
     user: summaryUser(r),
     tool: SUMMARY_TOOL,
-    maxTokens: 900,
+    maxTokens: 8000,
   });
   return {
     headline: clip(out.headline, 120),
     reads: (out.reads ?? []).slice(0, 5).map((x) => clip(x, 240)),
-    adapted: (out.adapted ?? []).slice(0, 3).map((x) => clip(x, 240)),
-    tip: clip(out.tip, 300),
+    tip: clip(out.tip, 360),
   };
 }
 

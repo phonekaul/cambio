@@ -18,7 +18,8 @@ export interface SummaryRequest {
   action: "summary";
   gauges: string;
   notes: string[];
-  adaptations: string[];
+  /** The biggest weak spot this round, worked out by the game; the tip should address it. */
+  focus: string;
   result: string;
   games: number;
 }
@@ -26,7 +27,6 @@ export interface SummaryRequest {
 export interface SummaryResponse {
   headline: string;
   reads: string[];
-  adapted: string[];
   tip: string;
 }
 

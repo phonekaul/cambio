@@ -285,6 +285,87 @@ export interface ModelNote {
   text: string;
   dir: 1 | -1 | 0;
   verdict: Verdict;
+  /** The weak spot this points at, if it's one worth fixing. */
+  leak?: LeakKey;
+}
+
+/* ------------------------------------------------------------------ */
+/* The one thing to work on                                            */
+/* ------------------------------------------------------------------ */
+
+export type LeakKey =
+  | "repeat-peek"
+  | "overwrote-low"
+  | "passed-low"
+  | "skipped-peek"
+  | "bad-burn"
+  | "guess-burn"
+  | "blind-cost"
+  | "blind-cambio";
+
+export const LEAKS: Record<LeakKey, { title: string; tip: string }> = {
+  "repeat-peek": {
+    title: "Wasted peeks",
+    tip: "When you get a peek, spend it on a card you have never seen. Re-checking a card you already know tells you nothing new.",
+  },
+  "overwrote-low": {
+    title: "Throwing away low cards",
+    tip: "Only swap over a card you know is high, or one you have never seen. A known Ace, 2, 3, Joker or red King is worth protecting.",
+  },
+  "passed-low": {
+    title: "Passing on free low cards",
+    tip: "When a Joker, red King or Ace is on top of the pile, take it and put it over your highest known card. A blind draw averages about 6.",
+  },
+  "skipped-peek": {
+    title: "Skipping free information",
+    tip: "Don't skip a 7 or 8 while you still have cards you haven't seen. The peek is free, and knowing your hand is what lets you call Cambio.",
+  },
+  "bad-burn": {
+    title: "Burning from shaky memory",
+    tip: "Only burn a card you are sure of. A wrong burn hands you a penalty card, about 6 points on average.",
+  },
+  "guess-burn": {
+    title: "Guessing at burns",
+    tip: "Don't burn cards you haven't seen. The chance of a match is about 1 in 13, and a miss costs you a penalty card.",
+  },
+  "blind-cost": {
+    title: "Swapping into unknown cards",
+    tip: "When you take a known card from the pile, put it over a card you know is high rather than one you've never seen.",
+  },
+  "blind-cambio": {
+    title: "Calling Cambio blind",
+    tip: "Before you call Cambio, know at least three of your cards. Every unknown card is worth about 6 points on average.",
+  },
+};
+
+const LEAK_WEIGHT: Record<Verdict, number> = { blunder: 2, mistake: 1.5, risky: 1, good: 0, read: 0 };
+/** Add one note's weight to this round's tally of weak spots. */
+export function tallyLeak(tally: Partial<Record<LeakKey, number>>, n: ModelNote): Partial<Record<LeakKey, number>> {
+  if (!n.leak || !LEAK_WEIGHT[n.verdict]) return tally;
+  return { ...tally, [n.leak]: (tally[n.leak] ?? 0) + LEAK_WEIGHT[n.verdict] };
+}
+
+export interface Focus {
+  title: string;
+  tip: string;
+  /** How often it happened this round (absent when the advice comes from the long-run profile). */
+  times?: number;
+}
+
+/**
+ * The single biggest thing to work on: this round's costliest weak spot, or, on a clean round,
+ * the profile's weakest trait.
+ */
+export function focusFor(tally: Partial<Record<LeakKey, number>>, counts: Partial<Record<LeakKey, number>>, m: PlayerModel): Focus {
+  const worst = (Object.entries(tally) as [LeakKey, number][]).sort((a, b) => b[1] - a[1])[0];
+  if (worst) return { ...LEAKS[worst[0]], times: counts[worst[0]] ?? 1 };
+  const g = gauges(m);
+  const sure = (k: TraitKey) => g[k].conf >= 0.3;
+  if (sure("memory") && g.memory.level === "Low") return { title: "Keeping track of your cards", tip: "Say your known cards to yourself after every swap. Most of your lost points came from not being sure what you held." };
+  if (sure("risk") && g.risk.level === "High") return { title: "Acting on unknown cards", tip: "Use peeks to learn a card before you swap over it. Blind moves are a coin flip, and the coin is weighted against you." };
+  if (sure("cambio") && g.cambio.level === "Low") return { title: "Calling Cambio sooner", tip: "Once you know your hand is under about 8 points, call Cambio. Every extra turn gives the opponent a chance to catch up." };
+  if (sure("discard") && g.discard.level === "Low") return { title: "Using the discard pile", tip: "A low card on the pile is a sure thing. Take it over a blind draw whenever it beats your highest known card." };
+  return { title: "Learning your hand early", tip: "Spend your early 7s and 8s on cards you haven't seen. The sooner you know your hand, the sooner you can call Cambio with confidence." };
 }
 
 const ordinal = (n: number) => {
@@ -346,7 +427,7 @@ export function observeHuman(
           bump(m.discard, 0, 1);
           notes.push(
             topV <= 1
-              ? { trait: "discard", text: `You passed on the ${cardLabel(top!)}, worth just ${topV}, for a blind draw. A sure low card beats a random one (average about 6).`, dir: -1, verdict: "mistake" }
+              ? { trait: "discard", text: `You passed on the ${cardLabel(top!)}, worth just ${topV}, for a blind draw. A sure low card beats a random one (average about 6).`, dir: -1, verdict: "mistake", leak: "passed-low" }
               : { trait: "discard", text: `You passed on the ${cardLabel(top!)} (worth ${topV}) in the discard pile. Either your known cards are low already, or you left points on the table.`, dir: -1, verdict: "read" },
           );
         }
@@ -363,20 +444,20 @@ export function observeHuman(
         risky(true, ev.from === "deck" ? 1 : 0.6);
         notes.push(
           inV !== null && inV > oldV
-            ? { trait: "risk", text: `You swapped the ${cardLabel(ev.incoming!)} into a card you hadn't seen, and it was a ${cardLabel(ev.old)}. That cost you ${inV - oldV} points.`, dir: 1, verdict: "mistake" }
+            ? { trait: "risk", text: `You swapped the ${cardLabel(ev.incoming!)} into a card you hadn't seen, and it was a ${cardLabel(ev.old)}. That cost you ${inV - oldV} points.`, dir: 1, verdict: "mistake", leak: "blind-cost" }
             : { trait: "risk", text: `You replaced your ${slotName(ev.slot)} card without knowing what it was. It turned out to be a ${cardLabel(ev.old)}.`, dir: 1, verdict: "risky" },
         );
       } else {
         risky(false, 0.5);
         if (inV !== null && inV > oldV) {
           bump(m.memory, 0, 1);
-          notes.push({ trait: "memory", text: `You knew your ${slotName(ev.slot)} card was a ${cardLabel(ev.old)}, then swapped the ${cardLabel(ev.incoming!)} in over it. That cost you ${inV - oldV} points.`, dir: -1, verdict: "blunder" });
+          notes.push({ trait: "memory", text: `You knew your ${slotName(ev.slot)} card was a ${cardLabel(ev.old)}, then swapped the ${cardLabel(ev.incoming!)} in over it. That cost you ${inV - oldV} points.`, dir: -1, verdict: "blunder", leak: "overwrote-low" });
         } else if (oldV >= 7) {
           bump(m.memory, 0.8, 0);
           notes.push({ trait: "memory", text: `You got rid of a ${cardLabel(ev.old)} you knew was high.`, dir: 1, verdict: "good" });
         } else if (oldV <= 3) {
           bump(m.memory, 0, 1);
-          notes.push({ trait: "memory", text: `You threw away a ${cardLabel(ev.old)} you'd already seen. Cards that low are worth keeping.`, dir: -1, verdict: "blunder" });
+          notes.push({ trait: "memory", text: `You threw away a ${cardLabel(ev.old)} you'd already seen. Cards that low are worth keeping.`, dir: -1, verdict: "blunder", leak: "overwrote-low" });
         }
       }
       keepOthers(ev.slot, 1);
@@ -404,15 +485,15 @@ export function observeHuman(
             trait: "memory",
             text: `You peeked at your ${slotName(ev.ownSlot)} card, which you'd already seen.${unseen ? ` You still had ${unseen} card${unseen === 1 ? "" : "s"} you'd never looked at.` : ""}`,
             dir: -1,
-            verdict: unseen ? "blunder" : "mistake",
+            verdict: unseen ? "blunder" : "mistake", leak: "repeat-peek",
           });
         }
       }
       if (ev.kind === "peekOpp" && ev.oppSlot !== undefined && before.own[ev.oppSlot]?.seenByOther) {
-        notes.push({ trait: "memory", text: `You peeked at my ${slotName(ev.oppSlot)} card, but you'd already seen it. Wasted peek.`, dir: -1, verdict: "blunder" });
+        notes.push({ trait: "memory", text: `You peeked at my ${slotName(ev.oppSlot)} card, but you'd already seen it. Wasted peek.`, dir: -1, verdict: "blunder", leak: "repeat-peek" });
       }
       if (ev.kind === "king" && ev.ownSlot !== undefined && seenSlot(ev.ownSlot)) {
-        notes.push({ trait: "memory", text: `With the King you looked at your ${slotName(ev.ownSlot)} card again, which you already knew.`, dir: -1, verdict: "mistake" });
+        notes.push({ trait: "memory", text: `With the King you looked at your ${slotName(ev.ownSlot)} card again, which you already knew.`, dir: -1, verdict: "mistake", leak: "repeat-peek" });
       }
       if (ev.kind === "blindSwap" && ev.ownSlot !== undefined) {
         useSlot(ev.ownSlot);
@@ -432,7 +513,7 @@ export function observeHuman(
       tally("discard-deck");
       const unseen = before.opp.filter((o) => o && !o.seenByOther).length;
       if (ev.kind === "peekOwn" && unseen > 0) {
-        notes.push({ trait: "memory", text: `You skipped a free peek while ${unseen} of your cards were still unknown.`, dir: -1, verdict: "mistake" });
+        notes.push({ trait: "memory", text: `You skipped a free peek while ${unseen} of your cards were still unknown.`, dir: -1, verdict: "mistake", leak: "skipped-peek" });
       }
       break;
     }
@@ -454,13 +535,13 @@ export function observeHuman(
           notes.push({ trait: "memory", text: `You burned the ${cardLabel(ev.card)} from memory. ${cardValue(ev.card)} points gone.`, dir: 1, verdict: "good" });
         } else if (ev.success) {
           risky(true, 1);
-          notes.push({ trait: "risk", text: `You burned a card you'd never seen and it happened to be a ${cardLabel(ev.card)}. Lucky.`, dir: 1, verdict: "risky" });
+          notes.push({ trait: "risk", text: `You burned a card you'd never seen and it happened to be a ${cardLabel(ev.card)}. Lucky.`, dir: 1, verdict: "risky", leak: "guess-burn" });
         } else if (slotSeen) {
           bump(m.memory, 0, 1.2);
-          notes.push({ trait: "memory", text: `You'd seen that card, but misremembered it: it was a ${cardLabel(ev.card)}. Penalty card.`, dir: -1, verdict: "blunder" });
+          notes.push({ trait: "memory", text: `You'd seen that card, but misremembered it: it was a ${cardLabel(ev.card)}. Penalty card.`, dir: -1, verdict: "blunder", leak: "bad-burn" });
         } else {
           risky(true, 1);
-          notes.push({ trait: "risk", text: `You tried to burn a card you'd never seen. It was a ${cardLabel(ev.card)}, so you took a penalty card.`, dir: 1, verdict: "mistake" });
+          notes.push({ trait: "risk", text: `You tried to burn a card you'd never seen. It was a ${cardLabel(ev.card)}, so you took a penalty card.`, dir: 1, verdict: "mistake", leak: "guess-burn" });
         }
       } else {
         // Burning one of my cards: did they really know it, or was it a guess?
@@ -470,7 +551,7 @@ export function observeHuman(
           notes.push({ trait: "memory", text: `You remembered my ${slotName(ev.slot)} card was a ${cardLabel(ev.card)} and burned it.`, dir: 1, verdict: "good" });
         } else if (ev.success) {
           risky(true, 1);
-          notes.push({ trait: "risk", text: `You guessed my ${slotName(ev.slot)} card without having seen it, and got it right. Lucky.`, dir: 1, verdict: "risky" });
+          notes.push({ trait: "risk", text: `You guessed my ${slotName(ev.slot)} card without having seen it, and got it right. Lucky.`, dir: 1, verdict: "risky", leak: "guess-burn" });
         } else {
           if (known) bump(m.memory, 0, 1.2);
           else risky(true, 1);
@@ -480,7 +561,7 @@ export function observeHuman(
               ? `You'd seen my ${slotName(ev.slot)} card but misremembered it: it was a ${cardLabel(ev.card)}. Penalty card.`
               : `You guessed at my ${slotName(ev.slot)} card without having seen it. It was a ${cardLabel(ev.card)}. Penalty card.`,
             dir: known ? -1 : 1,
-            verdict: known ? "blunder" : "mistake",
+            verdict: known ? "blunder" : "mistake", leak: known ? "bad-burn" : "guess-burn",
           });
         }
       }
@@ -502,7 +583,7 @@ export function observeHuman(
         trait: "cambio",
         text: `You called Cambio on your ${ordinal(t)} turn${unseen >= 2 ? `, with ${unseen} cards you hadn't looked at. Each unknown card averages about 6 points` : ""}.`,
         dir: t <= 6 ? 1 : -1,
-        verdict: unseen >= 2 ? "risky" : "read",
+        verdict: unseen >= 2 ? "risky" : "read", leak: unseen >= 2 ? "blind-cambio" : undefined,
       });
       break;
     }

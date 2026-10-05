@@ -55,6 +55,10 @@ import {
   observeHuman,
   profileFromModel,
   saveModel,
+  focusFor,
+  tallyLeak,
+  type Focus,
+  type LeakKey,
   type PlayerModel,
   type TraitKey,
 } from "../lib/model";
@@ -94,8 +98,11 @@ interface State {
   burning: boolean;
   pendingOwn: number | null;
   pulse: Partial<Record<TraitKey, number>>;
-  /** Moves where its read on you changed what it played (vs. the same position with no profile). */
-  adaptations: Adaptation[];
+  /** This round's weak spots, weighted by how bad each instance was, and how often each happened. */
+  leaks: Partial<Record<LeakKey, number>>;
+  leakCounts: Partial<Record<LeakKey, number>>;
+  /** The one thing to work on next time, decided when the round ends. */
+  focus: Focus | null;
   /** Why Claude can't be reached, if it can't; the opponent then plays on its built-in engine. */
   offline: string | null;
   notices: string[];
@@ -122,7 +129,9 @@ const initial: State = {
   burning: false,
   pendingOwn: null,
   pulse: {},
-  adaptations: [],
+  leaks: {},
+  leakCounts: {},
+  focus: null,
   offline: null,
   notices: [],
   summary: null,
@@ -132,14 +141,6 @@ const initial: State = {
   showProfile: false,
 };
 
-interface Adaptation {
-  played: string;
-  instead: string;
-  because: string;
-}
-
-/** Candidate labels carry estimates in brackets, e.g. "(unknown (about 5.9))"; drop them for display. */
-const plainLabel = (label: string) => label.replace(/\s*\((?:[^()]|\([^()]*\))*\)\s*$/, "");
 
 /** A short, fixable reason for the "Playing offline" note. */
 function offlineReason(e: unknown): string {
@@ -305,6 +306,8 @@ export default function Game() {
     const before = makeAiView(s.g);
     const behind = isHumanBehind(before);
     let model = s.model;
+    let leaks = s.leaks;
+    let leakCounts = s.leakCounts;
     const notices: FeedItem[] = [];
     const lines: string[] = [];
     const flashes: Flash[] = [];
@@ -314,6 +317,11 @@ export default function Game() {
       model = r.model;
       for (const n of r.notes) {
         notices.push({ id: nextId.current++, kind: "notice", text: n.text, trait: n.trait, dir: n.dir, verdict: n.verdict });
+        const tallied = tallyLeak(leaks, n);
+        if (tallied !== leaks && n.leak) {
+          leaks = tallied;
+          leakCounts = { ...leakCounts, [n.leak]: (leakCounts[n.leak] ?? 0) + 1 };
+        }
         if (n.trait !== "info") pulse[n.trait] = nextId.current;
       }
       const d = describe(ev);
@@ -325,6 +333,8 @@ export default function Game() {
       ...x,
       g: mv.g,
       model,
+      leaks,
+      leakCounts,
       feed: [...notices.reverse(), ...x.feed].slice(0, 60),
       notices: [...x.notices, ...notices.map((n) => (n.verdict && n.verdict !== "read" ? `${n.verdict.toUpperCase()}: ${n.text}` : n.text))].slice(-30),
       ticker: [...lines.reverse(), ...x.ticker].slice(0, 4),
@@ -519,16 +529,9 @@ export default function Game() {
     if (latest?.text === thought) return;
     const tags = Array.from(new Set(dec.influences.map((i) => FEATURE_LABEL[i.feature])));
     const changed = dec.changed && dec.candidates[0].id === cand.id;
-    // Only record moves your profile actually changed: same position, no profile, different move.
-    const neutral = dec.candidates.find((c) => c.id === dec.neutralTopId);
-    const adapted: Adaptation | null =
-      changed && neutral && dec.influences[0]
-        ? { played: plainLabel(cand.label), instead: plainLabel(neutral.label), because: dec.influences[0].text }
-        : null;
     set((x) => ({
       ...x,
       feed: [{ id: nextId.current++, kind: "thought" as const, text: thought, tags, changed }, ...x.feed].slice(0, 60),
-      adaptations: adapted ? [...x.adaptations, adapted].slice(-8) : x.adaptations,
     }));
   }
 
@@ -668,13 +671,16 @@ export default function Game() {
       r.calledBy ? ` ${r.calledBy === "human" ? "The player" : "The AI"} called Cambio.` : ""
     }`;
     const reads = localReads(s.model);
+    const focus = focusFor(s.leaks, s.leakCounts, s.model);
+    set((x) => ({ ...x, focus }));
+    const focusText = `${focus.title}${focus.times ? ` (${focus.times} time${focus.times === 1 ? "" : "s"} this round)` : " (from their overall profile; no clear errors this round)"}. Suggested fix: ${focus.tip}`;
     try {
       const res = await post<SummaryResponse>(
         {
           action: "summary",
           gauges: profileText(s.model),
           notes: s.notices.slice(-14),
-          adaptations: s.adaptations.slice(-6).map((a) => `${a.played} instead of ${a.instead}: ${a.because}`),
+          focus: focusText,
           result: resultText,
           games: s.priorGames,
         },
@@ -689,8 +695,7 @@ export default function Game() {
         summary: {
           headline: "My read on you",
           reads,
-          adapted: [],
-          tip: "",
+          tip: focus.tip,
         },
         summaryLoading: false,
       }));
@@ -963,7 +968,7 @@ function Menu(props: {
             <b>It learns how you play.</b> What you keep, what you pass on, how well you remember, how early you call Cambio.
           </li>
           <li>
-            <b>Then it shows its hand.</b> After each round you get its read on your game, the moves it made because of it, and one thing to try next time.
+            <b>Then it coaches you.</b> After each round you get its read on your game and the one thing to work on next time, based on the mistakes you actually made.
           </li>
         </ul>
         {stored && stored.games + 1 > 0 && stored.evidence > 0 && (
@@ -1022,21 +1027,16 @@ function ResultModal({ s, onAgain, onClose }: { s: State; onAgain: () => void; o
                   <li key={i}>{x}</li>
                 ))}
               </ul>
-              {s.adaptations.length > 0 && (
-                <>
-                  <h4>Where your habits changed its play</h4>
-                  <ul className="adapted">
-                    {s.adaptations.slice(-3).map((a, i) => (
-                      <li key={i}>
-                        <div><span className="k">Played</span> {a.played}</div>
-                        <div><span className="k">Would have</span> {a.instead}</div>
-                        <div><span className="k">Because</span> {a.because}</div>
-                      </li>
-                    ))}
-                  </ul>
-                </>
+              {s.focus && (
+                <div className="focus">
+                  <h4>Work on this next time</h4>
+                  <p className="focus-title">
+                    {s.focus.title}
+                    {s.focus.times ? <span> · {s.focus.times} time{s.focus.times === 1 ? "" : "s"} this round</span> : null}
+                  </p>
+                  <p>{sm.tip || s.focus.tip}</p>
+                </div>
               )}
-              {sm.tip && <p className="tip"><b>Try this:</b> {sm.tip}</p>}
             </>
           )}
         </div>

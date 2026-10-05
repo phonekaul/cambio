@@ -60,8 +60,7 @@ The round is over. Write the AI's honest read on this player, from the evidence 
 Rules:
 - Each "read" is one sentence starting with "You", about how they play (habits, tendencies, how they handle risk, memory, calling Cambio, which side of their hand they use). Be specific and a little insightful, never flattering for its own sake.
 - Only state what the evidence supports. Where confidence is low, say it's a first impression ("so far", "I'm not sure yet").
-- "adapted" lines start with "I" and describe how the read actually changed the AI's play this round. Use the adaptation log; if there is none, say the read mostly came too late to use.
-- "tip" is one concrete, friendly suggestion that would make the player better.
+- "tip" is the one thing to work on next time. It must address the BIGGEST IMPROVEMENT AREA below: say plainly what to do differently, in one or two sentences, and refer to what actually happened this round where you can (notes marked BLUNDER or MISTAKE). Practical, not preachy.
 - No names, no jokes, no emojis, no exclamation marks, no filler.`;
 
 export function summaryUser(r: SummaryRequest): string {
@@ -75,8 +74,8 @@ ${r.gauges}
 THINGS I NOTICED THIS ROUND
 ${r.notes.length ? r.notes.map((n) => `- ${n}`).join("\n") : "- (not much)"}
 
-TIMES THE PROFILE CHANGED MY PLAY
-${r.adaptations.length ? r.adaptations.map((n) => `- ${n}`).join("\n") : "- (none)"}`;
+BIGGEST IMPROVEMENT AREA
+${r.focus}`;
 }
 
 export const SUMMARY_TOOL = {
@@ -87,9 +86,8 @@ export const SUMMARY_TOOL = {
     properties: {
       headline: { type: "string", description: "A short, plain headline (under 10 words) capturing their style." },
       reads: { type: "array", minItems: 3, maxItems: 5, items: { type: "string" } },
-      adapted: { type: "array", maxItems: 3, items: { type: "string" } },
-      tip: { type: "string" },
+      tip: { type: "string", description: "The one thing to work on next time, addressing the biggest improvement area." },
     },
-    required: ["headline", "reads", "adapted", "tip"],
+    required: ["headline", "reads", "tip"],
   },
 };

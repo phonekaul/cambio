@@ -1,6 +1,6 @@
 import { realSetTimeout } from "./dom-setup";
 const g = globalThis as any;
-let llmCalls = 0, summaryCalls = 0;
+let llmCalls = 0, summaryCalls = 0, focusMissing = 0;
 g.fetch = async (_url: string, init: any) => {
   const body = JSON.parse(init.body);
   if (body.action === "decide") {
@@ -10,7 +10,8 @@ g.fetch = async (_url: string, init: any) => {
     return { ok: true, json: async () => ({ choice: llmCalls % 3 === 0 ? pick.id : body.candidates[0].id, thought: "Mock thought about " + body.candidates[0].label }) };
   }
   summaryCalls++;
-  return { ok: true, json: async () => ({ headline: "Mock headline", reads: ["You mock read one.", "You mock read two.", "You mock read three."], adapted: ["I adapted once."], tip: "Mock tip." }) };
+  if (!body.focus) focusMissing++;
+  return { ok: true, json: async () => ({ headline: "Mock headline", reads: ["You mock read one.", "You mock read two.", "You mock read three."], tip: "Mock tip." }) };
 };
 
 import React from "react";
@@ -76,6 +77,7 @@ async function playOne(gameNo: number, style: "draw-discard" | "swap" | "call-ea
   check(!!document.querySelector(".result"), `game ${gameNo} (${style}) reached the result screen in ${steps} steps`);
   await waitFor(() => { if (!document.querySelector(".reads")) throw new Error("no summary"); }, { timeout: 3000 });
   check(/Mock headline/.test(document.body.textContent ?? ""), "summary rendered");
+  check(/Work on this next time/.test(document.body.textContent ?? "") && /Mock tip/.test(document.body.textContent ?? ""), "the one thing to work on is shown");
   check(document.querySelectorAll(".hand.ai .pcard.up").length >= 1, "AI hand revealed at the end");
   await click(btn(/^Your profile$/));
   const ev = Number((document.querySelector(".profile .panel-head .status")?.textContent ?? "").match(/(\d+) observations/)?.[1] ?? 0);
@@ -92,6 +94,7 @@ async function playOne(gameNo: number, style: "draw-discard" | "swap" | "call-ea
   for (let i = 0; i < styles.length; i++) await playOne(i + 1, styles[i]);
   console.error = origErr;
   check(errs.length === 0, "no console errors: " + errs.slice(0, 3).join(" | "));
+  check(focusMissing === 0, `every summary request names an improvement area (${focusMissing} missing)`);
   check(burnTries > 0, `the player burned at least once (${burnTries})`);
   console.log(failures === 0 ? "\nALL UI CHECKS PASSED" : `\n${failures} UI FAILURES`);
   process.exit(failures ? 1 : 0);
