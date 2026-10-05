@@ -274,10 +274,17 @@ export function profileFromModel(m: PlayerModel): Profile {
 /* Observing the player                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * How a move looks to an opponent at the table. Judged only on public information: which cards
+ * you've looked at (anyone can watch you peek), what's on the pile, and what gets revealed.
+ */
+export type Verdict = "blunder" | "mistake" | "risky" | "good" | "read";
+
 export interface ModelNote {
   trait: TraitKey | "info";
   text: string;
   dir: 1 | -1 | 0;
+  verdict: Verdict;
 }
 
 const ordinal = (n: number) => {
@@ -334,10 +341,14 @@ export function observeHuman(
       if (topV !== null && topV <= 4) {
         if (ev.from === "discard") {
           bump(m.discard, 1, 0);
-          notes.push({ trait: "discard", text: `You grabbed the ${cardLabel(ev.card!)} from the discard pile.`, dir: 1 });
+          notes.push({ trait: "discard", text: `You took the ${cardLabel(ev.card!)} (worth ${topV}) off the pile. Guaranteed low card, no guessing.`, dir: 1, verdict: "good" });
         } else {
           bump(m.discard, 0, 1);
-          notes.push({ trait: "discard", text: `You passed on a ${cardLabel(top!)} in the discard pile.`, dir: -1 });
+          notes.push(
+            topV <= 1
+              ? { trait: "discard", text: `You passed on the ${cardLabel(top!)}, worth just ${topV}, for a blind draw. A sure low card beats a random one (average about 6).`, dir: -1, verdict: "mistake" }
+              : { trait: "discard", text: `You passed on the ${cardLabel(top!)} (worth ${topV}) in the discard pile. Either your known cards are low already, or you left points on the table.`, dir: -1, verdict: "read" },
+          );
         }
       }
       break;
@@ -347,17 +358,25 @@ export function observeHuman(
       const oldV = cardValue(ev.old);
       tally(ev.from === "deck" ? "swap-deck" : "swap-discard");
       useSlot(ev.slot);
+      const inV = ev.incoming ? cardValue(ev.incoming) : null;
       if (!slotSeen) {
         risky(true, ev.from === "deck" ? 1 : 0.6);
-        notes.push({ trait: "risk", text: `You replaced your ${slotName(ev.slot)} card without having looked at it.`, dir: 1 });
+        notes.push(
+          inV !== null && inV > oldV
+            ? { trait: "risk", text: `You swapped the ${cardLabel(ev.incoming!)} into a card you hadn't seen, and it was a ${cardLabel(ev.old)}. That cost you ${inV - oldV} points.`, dir: 1, verdict: "mistake" }
+            : { trait: "risk", text: `You replaced your ${slotName(ev.slot)} card without knowing what it was. It turned out to be a ${cardLabel(ev.old)}.`, dir: 1, verdict: "risky" },
+        );
       } else {
         risky(false, 0.5);
-        if (oldV >= 7) {
+        if (inV !== null && inV > oldV) {
+          bump(m.memory, 0, 1);
+          notes.push({ trait: "memory", text: `You knew your ${slotName(ev.slot)} card was a ${cardLabel(ev.old)}, then swapped the ${cardLabel(ev.incoming!)} in over it. That cost you ${inV - oldV} points.`, dir: -1, verdict: "blunder" });
+        } else if (oldV >= 7) {
           bump(m.memory, 0.8, 0);
-          notes.push({ trait: "memory", text: `You swapped out a ${cardLabel(ev.old)} you knew was high.`, dir: 1 });
+          notes.push({ trait: "memory", text: `You got rid of a ${cardLabel(ev.old)} you knew was high.`, dir: 1, verdict: "good" });
         } else if (oldV <= 3) {
           bump(m.memory, 0, 1);
-          notes.push({ trait: "memory", text: `You replaced a ${cardLabel(ev.old)} you'd already seen. That was a good card.`, dir: -1 });
+          notes.push({ trait: "memory", text: `You threw away a ${cardLabel(ev.old)} you'd already seen. Cards that low are worth keeping.`, dir: -1, verdict: "blunder" });
         }
       }
       keepOthers(ev.slot, 1);
@@ -370,7 +389,7 @@ export function observeHuman(
       const w = powerOf(ev.card) ? 0.3 : v <= 4 ? 1.5 : v <= 7 ? 1 : 0.4;
       keepOthers(-1, w);
       if (v <= 4 && !powerOf(ev.card)) {
-        notes.push({ trait: "info", text: `You discarded a ${cardLabel(ev.card)}, so I think the cards you know are already low.`, dir: 0 });
+        notes.push({ trait: "info", text: `You threw away a ${cardLabel(ev.card)}, so I think the cards you know are already lower than ${v}.`, dir: 0, verdict: "read" });
       }
       break;
     }
@@ -380,19 +399,43 @@ export function observeHuman(
         useSlot(ev.ownSlot);
         if (seenSlot(ev.ownSlot)) {
           bump(m.memory, 0, 0.5);
-          notes.push({ trait: "memory", text: `You peeked at your ${slotName(ev.ownSlot)} card, which you'd already seen.`, dir: -1 });
+          const unseen = before.opp.filter((o) => o && !o.seenByOther).length;
+          notes.push({
+            trait: "memory",
+            text: `You peeked at your ${slotName(ev.ownSlot)} card, which you'd already seen.${unseen ? ` You still had ${unseen} card${unseen === 1 ? "" : "s"} you'd never looked at.` : ""}`,
+            dir: -1,
+            verdict: unseen ? "blunder" : "mistake",
+          });
         }
+      }
+      if (ev.kind === "peekOpp" && ev.oppSlot !== undefined && before.own[ev.oppSlot]?.seenByOther) {
+        notes.push({ trait: "memory", text: `You peeked at my ${slotName(ev.oppSlot)} card, but you'd already seen it. Wasted peek.`, dir: -1, verdict: "blunder" });
+      }
+      if (ev.kind === "king" && ev.ownSlot !== undefined && seenSlot(ev.ownSlot)) {
+        notes.push({ trait: "memory", text: `With the King you looked at your ${slotName(ev.ownSlot)} card again, which you already knew.`, dir: -1, verdict: "mistake" });
       }
       if (ev.kind === "blindSwap" && ev.ownSlot !== undefined) {
         useSlot(ev.ownSlot);
         risky(true, 0.8);
-        notes.push({ trait: "risk", text: "You swapped blind. That's a gamble.", dir: 1 });
+        notes.push({
+          trait: "risk",
+          text: seenSlot(ev.ownSlot)
+            ? `You blind-swapped away your ${slotName(ev.ownSlot)} card, one you knew. Fine if it was high.`
+            : `You blind-swapped a card you'd never seen for one of mine. Two unknowns.`,
+          dir: 1,
+          verdict: "risky",
+        });
       }
       break;
     }
-    case "powerSkip":
+    case "powerSkip": {
       tally("discard-deck");
+      const unseen = before.opp.filter((o) => o && !o.seenByOther).length;
+      if (ev.kind === "peekOwn" && unseen > 0) {
+        notes.push({ trait: "memory", text: `You skipped a free peek while ${unseen} of your cards were still unknown.`, dir: -1, verdict: "mistake" });
+      }
       break;
+    }
     case "kingSwap": {
       if (ev.swapped && ev.ownSlot >= 0) {
         useSlot(ev.ownSlot);
@@ -408,30 +451,37 @@ export function observeHuman(
         if (ev.success && slotSeen) {
           bump(m.memory, 1, 0);
           risky(false, 0.3);
-          notes.push({ trait: "memory", text: `You burned the ${cardLabel(ev.card)} from memory.`, dir: 1 });
+          notes.push({ trait: "memory", text: `You burned the ${cardLabel(ev.card)} from memory. ${cardValue(ev.card)} points gone.`, dir: 1, verdict: "good" });
         } else if (ev.success) {
           risky(true, 1);
-          notes.push({ trait: "risk", text: `You burned blind and it paid off (${cardLabel(ev.card)}).`, dir: 1 });
+          notes.push({ trait: "risk", text: `You burned a card you'd never seen and it happened to be a ${cardLabel(ev.card)}. Lucky.`, dir: 1, verdict: "risky" });
         } else if (slotSeen) {
           bump(m.memory, 0, 1.2);
-          notes.push({ trait: "memory", text: `You tried to burn a card you'd seen, but it was a ${cardLabel(ev.card)}.`, dir: -1 });
+          notes.push({ trait: "memory", text: `You'd seen that card, but misremembered it: it was a ${cardLabel(ev.card)}. Penalty card.`, dir: -1, verdict: "blunder" });
         } else {
           risky(true, 1);
-          notes.push({ trait: "risk", text: "You tried a blind burn and missed.", dir: 1 });
+          notes.push({ trait: "risk", text: `You tried to burn a card you'd never seen. It was a ${cardLabel(ev.card)}, so you took a penalty card.`, dir: 1, verdict: "mistake" });
         }
       } else {
         // Burning one of my cards: did they really know it, or was it a guess?
         const known = before.own[ev.slot]?.seenByOther ?? false;
         if (ev.success && known) {
           bump(m.memory, 1, 0);
-          notes.push({ trait: "memory", text: `You remembered my ${slotName(ev.slot)} card was a ${cardLabel(ev.card)} and burned it.`, dir: 1 });
+          notes.push({ trait: "memory", text: `You remembered my ${slotName(ev.slot)} card was a ${cardLabel(ev.card)} and burned it.`, dir: 1, verdict: "good" });
         } else if (ev.success) {
           risky(true, 1);
-          notes.push({ trait: "risk", text: `You guessed my ${slotName(ev.slot)} card and got it right.`, dir: 1 });
+          notes.push({ trait: "risk", text: `You guessed my ${slotName(ev.slot)} card without having seen it, and got it right. Lucky.`, dir: 1, verdict: "risky" });
         } else {
           if (known) bump(m.memory, 0, 1.2);
           else risky(true, 1);
-          notes.push({ trait: known ? "memory" : "risk", text: `You tried to burn my ${slotName(ev.slot)} card, but it was a ${cardLabel(ev.card)}.`, dir: known ? -1 : 1 });
+          notes.push({
+            trait: known ? "memory" : "risk",
+            text: known
+              ? `You'd seen my ${slotName(ev.slot)} card but misremembered it: it was a ${cardLabel(ev.card)}. Penalty card.`
+              : `You guessed at my ${slotName(ev.slot)} card without having seen it. It was a ${cardLabel(ev.card)}. Penalty card.`,
+            dir: known ? -1 : 1,
+            verdict: known ? "blunder" : "mistake",
+          });
         }
       }
       break;
@@ -450,8 +500,9 @@ export function observeHuman(
       risky(unseen >= 2, 1);
       notes.push({
         trait: "cambio",
-        text: `You called Cambio on your ${ordinal(t)} turn${unseen >= 2 ? `, with ${unseen} cards you hadn't looked at` : ""}.`,
+        text: `You called Cambio on your ${ordinal(t)} turn${unseen >= 2 ? `, with ${unseen} cards you hadn't looked at. Each unknown card averages about 6 points` : ""}.`,
         dir: t <= 6 ? 1 : -1,
+        verdict: unseen >= 2 ? "risky" : "read",
       });
       break;
     }

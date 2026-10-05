@@ -3,7 +3,7 @@
 import { useState, type ReactNode } from "react";
 import { SUIT_GLYPH, isRed, slotName, type Card } from "../lib/cards";
 import type { Hand, Side } from "../lib/engine";
-import { behindInsight, gauges, localReads, positionInfo, type PlayerModel, type TraitKey } from "../lib/model";
+import { behindInsight, gauges, localReads, positionInfo, type PlayerModel, type TraitKey, type Verdict } from "../lib/model";
 
 /* ------------------------------------------------------------------ */
 /* Cards                                                               */
@@ -122,17 +122,10 @@ export interface FeedItem {
   changed?: boolean;
   trait?: TraitKey | "info";
   dir?: 1 | -1 | 0;
+  verdict?: Verdict;
 }
 
-const TRAIT_EMOJI: Record<string, string> = {
-  risk: "🎲",
-  memory: "🧠",
-  cambio: "🔔",
-  discard: "♻️",
-  predict: "🔁",
-  position: "🧭",
-  info: "💡",
-};
+const VERDICT_LABEL: Record<Verdict, string> = { blunder: "Blunder", mistake: "Mistake", risky: "Risky", good: "Good", read: "Read" };
 
 /** Top-right box: the opponent's reasoning and what it notices about you (newest first). */
 export function ThoughtsPanel(props: { feed: FeedItem[]; thinking: boolean; offline: string | null }) {
@@ -170,11 +163,9 @@ export function ThoughtsPanel(props: { feed: FeedItem[]; thinking: boolean; offl
               )}
             </article>
           ) : (
-            <article key={f.id} className={`notice ${f.dir === 1 ? "up" : f.dir === -1 ? "down" : ""}`}>
-              <span className="ico">{TRAIT_EMOJI[f.trait ?? "info"]}</span>
-              <p>
-                <b>Noticed:</b> {f.text}
-              </p>
+            <article key={f.id} className="notice">
+              <span className={`verdict ${f.verdict ?? "read"}`}>{VERDICT_LABEL[f.verdict ?? "read"]}</span>
+              <p>{f.text}</p>
             </article>
           ),
         )}
@@ -187,13 +178,14 @@ export function ThoughtsPanel(props: { feed: FeedItem[]; thinking: boolean; offl
 /* Player profile                                                      */
 /* ------------------------------------------------------------------ */
 
+const cap = (w: string) => w.charAt(0).toUpperCase() + w.slice(1);
 const confLabel = (c: number) => (c < 0.34 ? "low" : c < 0.6 ? "medium" : "high");
 
 export function ProfilePanel(props: { model: PlayerModel; pulse: Partial<Record<TraitKey, number>>; priorGames: number }) {
   const { model, pulse, priorGames } = props;
   const g = gauges(model);
   const pos = positionInfo(model);
-  const order: TraitKey[] = ["risk", "memory", "cambio", "position", "discard", "predict"];
+  const order: TraitKey[] = ["risk", "memory", "discard", "predict", "cambio", "position"];
   const insight = behindInsight(model);
   const maxUse = Math.max(1, ...model.slotUse.slice(0, 4));
   return (
@@ -226,7 +218,7 @@ export function ProfilePanel(props: { model: PlayerModel; pulse: Partial<Record<
               <div className="g-sub">
                 <span>{unknown ? "no evidence yet" : x.blurb}</span>
                 <span className="conf" title="How much evidence backs this">
-                  {confLabel(x.conf)} confidence
+                  {cap(confLabel(x.conf))} confidence
                 </span>
               </div>
               {k === "position" && (

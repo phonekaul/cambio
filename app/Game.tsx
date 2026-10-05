@@ -313,7 +313,7 @@ export default function Game() {
       const r = observeHuman(model, ev, before, { behind });
       model = r.model;
       for (const n of r.notes) {
-        notices.push({ id: nextId.current++, kind: "notice", text: n.text, trait: n.trait, dir: n.dir });
+        notices.push({ id: nextId.current++, kind: "notice", text: n.text, trait: n.trait, dir: n.dir, verdict: n.verdict });
         if (n.trait !== "info") pulse[n.trait] = nextId.current;
       }
       const d = describe(ev);
@@ -326,7 +326,7 @@ export default function Game() {
       g: mv.g,
       model,
       feed: [...notices.reverse(), ...x.feed].slice(0, 60),
-      notices: [...x.notices, ...notices.map((n) => n.text)].slice(-30),
+      notices: [...x.notices, ...notices.map((n) => (n.verdict && n.verdict !== "read" ? `${n.verdict.toUpperCase()}: ${n.text}` : n.text))].slice(-30),
       ticker: [...lines.reverse(), ...x.ticker].slice(0, 4),
       flashes: [...x.flashes, ...flashes],
       pulse: { ...x.pulse, ...pulse },
